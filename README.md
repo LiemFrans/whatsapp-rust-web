@@ -27,14 +27,15 @@ whatsapp-rust-web/
 
 ### Prerequisites
 
-- [Rust](https://www.rust-lang.org/tools/install) (1.70 or later)
+- [Rust](https://www.rust-lang.org/tools/install) with **nightly** toolchain (`rustup toolchain install nightly`)
+  - The backend's `rust-toolchain.toml` selects nightly automatically; `cargo run` picks it up without any extra flags.
 - [Node.js](https://nodejs.org/) (18 or later) and npm
 
 ---
 
 ### Backend
 
-The backend is a minimal HTTP server built with [Axum](https://github.com/tokio-rs/axum). It listens on port **3000** by default.
+The backend is a Rust HTTP server built with [Axum](https://github.com/tokio-rs/axum) that integrates the [whatsapp-rust](https://github.com/jlucaso1/whatsapp-rust) client library. It listens on port **3000** by default.
 
 ```bash
 # From the repository root
@@ -42,13 +43,15 @@ cd backend
 cargo run
 ```
 
-The server will start and print:
+On first run, a QR code is printed to the terminal — scan it with the WhatsApp mobile app to authenticate. The session is saved in `backend/whatsapp.db` for subsequent runs.
+
+The server will also print:
 
 ```
 Backend listening on http://0.0.0.0:3000
 ```
 
-Visit <http://localhost:3000> to confirm it is running.
+Visit <http://localhost:3000> to confirm it is running; the response includes the current WhatsApp connection status.
 
 ---
 
