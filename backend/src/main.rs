@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{extract::State, routing::get, Router};
 use wacore::types::events::Event;
-use whatsapp::{bot::Bot, store::SqliteStore, Client};
+use whatsapp_rust::{bot::Bot, store::SqliteStore, Client};
 use whatsapp_rust_tokio_transport::TokioWebSocketTransportFactory;
 use whatsapp_rust_ureq_http_client::UreqHttpClient;
 
@@ -15,6 +15,7 @@ struct AppState {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Allow the database path to be configured via an environment variable.
     let db_path = std::env::var("WHATSAPP_DB_PATH").unwrap_or_else(|_| "whatsapp.db".to_string());
+    let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
     let backend = Arc::new(SqliteStore::new(&db_path).await?);
 
     let mut bot = Bot::builder()
@@ -59,8 +60,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/", get(root))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-    println!("Backend listening on http://0.0.0.0:3000");
+    let bind_addr = format!("0.0.0.0:{port}");
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    println!("Backend listening on http://{bind_addr}");
     axum::serve(listener, app).await?;
 
     Ok(())

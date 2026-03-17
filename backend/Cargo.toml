@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
-whatsapp = { git = "https://github.com/jlucaso1/whatsapp-rust" }
-whatsapp-rust-tokio-transport = { git = "https://github.com/jlucaso1/whatsapp-rust" }
-whatsapp-rust-ureq-http-client = { git = "https://github.com/jlucaso1/whatsapp-rust" }
+whatsapp_rust = { package = "whatsapp-rust", git = "https://github.com/jlucaso1/whatsapp-rust", features = ["sqlite-storage"] }
+whatsapp_rust_tokio_transport = { package = "whatsapp-rust-tokio-transport", git = "https://github.com/jlucaso1/whatsapp-rust" }
+whatsapp_rust_ureq_http_client = { package = "whatsapp-rust-ureq-http-client", git = "https://github.com/jlucaso1/whatsapp-rust" }
 wacore = { git = "https://github.com/jlucaso1/whatsapp-rust" }
