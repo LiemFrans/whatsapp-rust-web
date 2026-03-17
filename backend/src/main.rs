@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{extract::State, routing::get, Router};
 use wacore::types::events::Event;
-use whatsapp_rust::{bot::Bot, store::SqliteStore, Client};
+use whatsapp::{bot::Bot, store::SqliteStore, Client};
 use whatsapp_rust_tokio_transport::TokioWebSocketTransportFactory;
 use whatsapp_rust_ureq_http_client::UreqHttpClient;
 
