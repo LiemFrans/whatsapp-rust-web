@@ -8,6 +8,8 @@ import { test, expect } from "@playwright/test";
 
 test.describe("WhatsApp Web Clone", () => {
   test.beforeEach(async ({ page }) => {
+    let mockedMessages: Array<Record<string, unknown>> = [];
+
     await page.route("**/api/bootstrap", async (route) => {
       await route.fulfill({
         status: 200,
@@ -24,10 +26,45 @@ test.describe("WhatsApp Web Clone", () => {
     });
 
     await page.route("**/api/chats/**/messages", async (route) => {
+      if (mockedMessages.length === 0) {
+        await route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "Chat not found" }),
+        });
+        return;
+      }
+
       await route.fulfill({
-        status: 404,
+        status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ error: "Chat not found" }),
+        body: JSON.stringify({ messages: mockedMessages }),
+      });
+    });
+
+    await page.route("**/api/messages/send", async (route) => {
+      mockedMessages = [
+        {
+          id: "3EB0MOCK123456",
+          chat_jid: "15551234567@s.whatsapp.net",
+          sender_jid: "me",
+          sender_name: "You",
+          text: "Hello from Playwright!",
+          timestamp_ms: Date.now(),
+          from_me: true,
+          mentions: [],
+          media: null,
+          receipt_status: "sent",
+        },
+      ];
+
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          success: true,
+          message_id: "3EB0MOCK123456",
+        }),
       });
     });
   });
@@ -85,17 +122,6 @@ test.describe("WhatsApp Web Clone", () => {
           chats: [],
           contacts: [],
           logout_hint: null,
-        }),
-      });
-    });
-
-    await page.route("**/api/messages/send", async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          success: true,
-          message_id: "3EB0MOCK123456",
         }),
       });
     });

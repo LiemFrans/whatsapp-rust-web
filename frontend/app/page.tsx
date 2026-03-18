@@ -20,6 +20,22 @@ interface ApiMessage {
   text: string;
   timestamp_ms: number;
   from_me: boolean;
+  mentions: { jid: string; name: string }[];
+  media: {
+    kind: string;
+    mime_type: string | null;
+    caption: string | null;
+    file_name: string | null;
+    file_length: number | null;
+    width: number | null;
+    height: number | null;
+    duration_seconds: number | null;
+    is_voice_note: boolean;
+    is_gif: boolean;
+    is_sticker: boolean;
+    download_path: string | null;
+  } | null;
+  receipt_status: string | null;
 }
 
 interface ApiChat {
@@ -34,6 +50,9 @@ interface ApiChat {
   muted: boolean;
   avatar_url: string | null;
   status: string | null;
+  typing: string | null;
+  is_online: boolean;
+  last_seen_ms: number | null;
 }
 
 interface ApiContact {
@@ -53,6 +72,78 @@ interface BootstrapResponse {
   chats: ApiChat[];
   contacts: ApiContact[];
   logout_hint: string | null;
+}
+
+function normalizeMessage(input: Partial<ApiMessage> | null | undefined): ApiMessage {
+  return {
+    id: input?.id ?? `${Date.now()}`,
+    chat_jid: input?.chat_jid ?? "",
+    sender_jid: input?.sender_jid ?? "",
+    sender_name: input?.sender_name ?? null,
+    text: input?.text ?? "",
+    timestamp_ms: input?.timestamp_ms ?? Date.now(),
+    from_me: Boolean(input?.from_me),
+    mentions: Array.isArray(input?.mentions) ? input!.mentions : [],
+    media: input?.media
+      ? {
+          kind: input.media.kind ?? "unknown",
+          mime_type: input.media.mime_type ?? null,
+          caption: input.media.caption ?? null,
+          file_name: input.media.file_name ?? null,
+          file_length: input.media.file_length ?? null,
+          width: input.media.width ?? null,
+          height: input.media.height ?? null,
+          duration_seconds: input.media.duration_seconds ?? null,
+          is_voice_note: Boolean(input.media.is_voice_note),
+          is_gif: Boolean(input.media.is_gif),
+          is_sticker: Boolean(input.media.is_sticker),
+          download_path: input.media.download_path ?? null,
+        }
+      : null,
+    receipt_status: input?.receipt_status ?? null,
+  };
+}
+
+function normalizeChat(input: Partial<ApiChat> | null | undefined): ApiChat {
+  return {
+    jid: input?.jid ?? "",
+    name: input?.name ?? input?.phone ?? input?.jid ?? "Unknown",
+    phone: input?.phone ?? null,
+    is_group: Boolean(input?.is_group),
+    preview: input?.preview ?? null,
+    timestamp_ms: input?.timestamp_ms ?? null,
+    unread_count: input?.unread_count ?? 0,
+    archived: Boolean(input?.archived),
+    muted: Boolean(input?.muted),
+    avatar_url: input?.avatar_url ?? null,
+    status: input?.status ?? null,
+    typing: input?.typing ?? null,
+    is_online: Boolean(input?.is_online),
+    last_seen_ms: input?.last_seen_ms ?? null,
+  };
+}
+
+function normalizeContact(input: Partial<ApiContact> | null | undefined): ApiContact {
+  return {
+    jid: input?.jid ?? "",
+    name: input?.name ?? input?.phone ?? input?.jid ?? "Unknown",
+    phone: input?.phone ?? null,
+    status: input?.status ?? null,
+    avatar_url: input?.avatar_url ?? null,
+    is_business: Boolean(input?.is_business),
+    is_registered: input?.is_registered ?? true,
+  };
+}
+
+function normalizeBootstrap(input: Partial<BootstrapResponse> | null | undefined): BootstrapResponse {
+  return {
+    qr_code: input?.qr_code ?? null,
+    is_connected: Boolean(input?.is_connected),
+    is_syncing: Boolean(input?.is_syncing),
+    chats: Array.isArray(input?.chats) ? input!.chats.map(normalizeChat) : [],
+    contacts: Array.isArray(input?.contacts) ? input!.contacts.map(normalizeContact) : [],
+    logout_hint: input?.logout_hint ?? null,
+  };
 }
 
 function SendIcon() {
@@ -151,7 +242,109 @@ function makeManualChat(phone: string): ApiChat {
     muted: false,
     avatar_url: null,
     status: null,
+    typing: null,
+    is_online: false,
+    last_seen_ms: null,
   };
+}
+
+function formatFileSize(bytes: number | null) {
+  if (!bytes) return null;
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function formatPresence(chat: ApiChat) {
+  if (chat.typing) return chat.typing;
+  if (chat.is_online) return "online";
+  if (chat.last_seen_ms) {
+    return `last seen ${new Date(chat.last_seen_ms).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    })}`;
+  }
+  return chat.status ?? (chat.is_group ? "Synced group" : chat.phone ? `+${chat.phone}` : chat.jid);
+}
+
+function getReceiptIcon(status: string | null) {
+  if (!status) return "";
+  if (status === "played") return "▶▶";
+  if (status === "read") return "✓✓";
+  if (status === "delivered") return "✓✓";
+  return "✓";
+}
+
+function getReceiptColor(status: string | null) {
+  if (status === "read" || status === "played") return "text-sky-500";
+  return "text-wa-text-secondary";
+}
+
+function renderTextWithMentions(message: ApiMessage) {
+  const text = message.text || message.media?.caption || "";
+  const mentions = Array.isArray(message.mentions) ? message.mentions : [];
+  if (!mentions.length) return text;
+
+  let output = text;
+  for (const mention of mentions) {
+    const phone = phoneFromJid(mention.jid);
+    if (phone) {
+      output = output.replaceAll(`@${phone}`, `@${mention.name}`);
+    }
+  }
+  return output;
+}
+
+function MessageMedia({ message }: { message: ApiMessage }) {
+  if (!message.media?.download_path) return null;
+
+  if (message.media.kind === "image" || message.media.kind === "sticker") {
+    return (
+      <img
+        src={message.media.download_path}
+        alt={message.media.caption ?? message.media.file_name ?? message.media.kind}
+        className={clsx(
+          "mb-2 max-h-72 rounded-2xl object-contain",
+          message.media.kind === "sticker" && "max-h-40 bg-transparent",
+        )}
+      />
+    );
+  }
+
+  if (message.media.kind === "video") {
+    return (
+      <video
+        src={message.media.download_path}
+        controls
+        playsInline
+        className="mb-2 max-h-80 rounded-2xl bg-black"
+      />
+    );
+  }
+
+  if (message.media.kind === "audio") {
+    return <audio src={message.media.download_path} controls className="mb-2 w-full max-w-xs" />;
+  }
+
+  return (
+    <a
+      href={message.media.download_path}
+      target="_blank"
+      rel="noreferrer"
+      className="mb-2 flex items-center gap-3 rounded-2xl bg-black/5 px-3 py-3 text-sm text-wa-text transition hover:bg-black/10"
+    >
+      <span className="text-lg">📎</span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate font-medium">{message.media.file_name ?? "Document"}</span>
+        <span className="block text-xs text-wa-text-secondary">{formatFileSize(message.media.file_length)}</span>
+      </span>
+    </a>
+  );
 }
 
 export default function Home() {
@@ -167,7 +360,9 @@ export default function Home() {
   const [showNewChat, setShowNewChat] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [picker, setPicker] = useState<"emoji" | "gif" | "sticker" | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const typingTimeoutRef = useRef<number | null>(null);
 
   const chats = useMemo(() => {
     const map = new Map<string, ApiChat>();
@@ -184,6 +379,40 @@ export default function Home() {
   const isConnected = bootstrap?.is_connected ?? false;
   const isSyncing = bootstrap?.is_syncing ?? false;
   const qrCode = bootstrap?.qr_code ?? null;
+
+  const entityIndex = useMemo(() => {
+    const map = new Map<string, { jid: string; name: string }>();
+    for (const contact of contacts) {
+      map.set(contact.jid, { jid: contact.jid, name: contact.name });
+      if (contact.phone) map.set(contact.phone.toLowerCase(), { jid: contact.jid, name: contact.name });
+      map.set(contact.name.toLowerCase(), { jid: contact.jid, name: contact.name });
+    }
+    for (const chat of chats) {
+      map.set(chat.jid, { jid: chat.jid, name: chat.name });
+      if (chat.phone) map.set(chat.phone.toLowerCase(), { jid: chat.jid, name: chat.name });
+      map.set(chat.name.toLowerCase(), { jid: chat.jid, name: chat.name });
+    }
+    return map;
+  }, [chats, contacts]);
+
+  const extractMentions = useCallback(
+    (text: string) => {
+      const seen = new Set<string>();
+      return text
+        .split(/\s+/)
+        .map((part) => part.trim())
+        .filter((part) => part.startsWith("@") && part.length > 1)
+        .map((part) => part.slice(1).replace(/[^a-zA-Z0-9._-]/g, "").toLowerCase())
+        .map((token) => entityIndex.get(token) ?? null)
+        .filter((value): value is { jid: string; name: string } => Boolean(value))
+        .filter((value) => {
+          if (seen.has(value.jid)) return false;
+          seen.add(value.jid);
+          return true;
+        });
+    },
+    [entityIndex],
+  );
 
   const activeChat = useMemo(
     () => chats.find((chat) => chat.jid === activeChatId) ?? null,
@@ -222,8 +451,9 @@ export default function Home() {
         return;
       }
       if (!res.ok) return;
-      const data = (await res.json()) as { messages: ApiMessage[] };
-      setMessages(data.messages);
+      const data = (await res.json()) as { messages?: ApiMessage[] };
+      setMessages(Array.isArray(data.messages) ? data.messages.map(normalizeMessage) : []);
+      void fetch(`/api/chats/${encodeURIComponent(chatId)}/read`, { method: "POST" });
     } catch {
       setMessages([]);
     }
@@ -234,7 +464,7 @@ export default function Home() {
       try {
         const res = await fetch("/api/bootstrap", { cache: "no-store" });
         if (!res.ok) return;
-        const data = (await res.json()) as BootstrapResponse;
+        const data = normalizeBootstrap((await res.json()) as Partial<BootstrapResponse>);
         setBootstrap(data);
 
         const map = new Map<string, ApiChat>();
@@ -274,6 +504,40 @@ export default function Home() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    if (!activeChat || !messageText.trim()) {
+      if (typingTimeoutRef.current) {
+        window.clearTimeout(typingTimeoutRef.current);
+        typingTimeoutRef.current = null;
+      }
+      return;
+    }
+
+    void fetch(`/api/chats/${encodeURIComponent(activeChat.jid)}/typing`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ state: "composing" }),
+    });
+
+    if (typingTimeoutRef.current) {
+      window.clearTimeout(typingTimeoutRef.current);
+    }
+
+    typingTimeoutRef.current = window.setTimeout(() => {
+      void fetch(`/api/chats/${encodeURIComponent(activeChat.jid)}/typing`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ state: "paused" }),
+      });
+    }, 1200);
+
+    return () => {
+      if (typingTimeoutRef.current) {
+        window.clearTimeout(typingTimeoutRef.current);
+      }
+    };
+  }, [activeChat, messageText]);
 
   const handleSelectChat = useCallback(
     async (chatId: string) => {
@@ -333,18 +597,18 @@ export default function Home() {
       event.preventDefault();
       if (!activeChat || !messageText.trim()) return;
 
-      const phone = activeChat.phone ?? phoneFromJid(activeChat.jid);
-      if (!phone || activeChat.is_group) {
-        setSendStatus("Sending is currently available for direct chats only.");
-        window.setTimeout(() => setSendStatus(null), 3000);
-        return;
-      }
+      const mentions = extractMentions(messageText);
 
       try {
         const res = await fetch("/api/messages/send", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ phone, message: messageText }),
+          body: JSON.stringify({
+            jid: activeChat.jid,
+            phone: activeChat.phone ?? phoneFromJid(activeChat.jid),
+            message: messageText,
+            mentions: mentions.map((mention) => mention.jid),
+          }),
         });
         const data = await res.json();
 
@@ -357,9 +621,13 @@ export default function Home() {
             text: messageText,
             timestamp_ms: Date.now(),
             from_me: true,
+            mentions,
+            media: null,
+            receipt_status: "sent",
           };
           setMessages((prev) => [...prev, optimistic]);
           setMessageText("");
+          setPicker(null);
           setSendStatus("Message sent!");
           await refresh(activeChat.jid);
         } else {
@@ -371,7 +639,7 @@ export default function Home() {
 
       window.setTimeout(() => setSendStatus(null), 3000);
     },
-    [activeChat, messageText, refresh],
+    [activeChat, extractMentions, messageText, refresh],
   );
 
   if (isLoading) {
@@ -574,7 +842,7 @@ export default function Home() {
                       </div>
                       <div className="mt-1 flex items-center justify-between gap-3">
                         <p className="truncate text-sm text-wa-text-secondary">
-                          {chat.preview ?? (chat.is_group ? "Group synced" : chat.phone ? `+${chat.phone}` : chat.jid)}
+                          {chat.typing ?? chat.preview ?? (chat.is_group ? "Group synced" : chat.phone ? `+${chat.phone}` : chat.jid)}
                         </p>
                         {chat.unread_count > 0 ? (
                           <span className="rounded-full bg-wa-teal px-2 py-0.5 text-[11px] font-semibold text-white">
@@ -639,7 +907,7 @@ export default function Home() {
                   <div>
                     <h2 className="text-sm font-medium text-wa-text">{activeChat.name}</h2>
                     <p className="text-xs text-wa-text-secondary">
-                      {activeChat.status ?? (activeChat.is_group ? "Synced group" : activeChat.phone ? `+${activeChat.phone}` : activeChat.jid)}
+                      {formatPresence(activeChat)}
                     </p>
                   </div>
                 </div>
@@ -678,9 +946,29 @@ export default function Home() {
                             {message.sender_name}
                           </p>
                         ) : null}
-                        <p className="whitespace-pre-wrap text-sm text-wa-text">{message.text}</p>
-                        <div className="mt-1 text-right text-[11px] text-wa-text-secondary">
-                          {formatTime(message.timestamp_ms)}
+                        <MessageMedia message={message} />
+                        {Array.isArray(message.mentions) && message.mentions.length ? (
+                          <div className="mb-2 flex flex-wrap gap-1">
+                            {message.mentions.map((mention) => (
+                              <span
+                                key={`${message.id}-${mention.jid}`}
+                                className="rounded-full bg-wa-teal/10 px-2 py-0.5 text-[11px] font-medium text-wa-teal-dark"
+                              >
+                                @{mention.name}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                        {message.text || message.media?.caption ? (
+                          <p className="whitespace-pre-wrap text-sm text-wa-text">{renderTextWithMentions(message)}</p>
+                        ) : null}
+                        <div className="mt-1 flex items-center justify-end gap-1 text-right text-[11px] text-wa-text-secondary">
+                          <span>{formatTime(message.timestamp_ms)}</span>
+                          {message.from_me ? (
+                            <span className={clsx("font-semibold", getReceiptColor(message.receipt_status))}>
+                              {getReceiptIcon(message.receipt_status)}
+                            </span>
+                          ) : null}
                         </div>
                       </div>
                     </div>
@@ -698,20 +986,55 @@ export default function Home() {
                     {sendStatus}
                   </div>
                 ) : null}
+                {picker ? (
+                  <div className="mb-2 rounded-2xl bg-white px-3 py-3 shadow-sm">
+                    <div className="mb-2 flex items-center justify-between text-xs font-medium uppercase tracking-wide text-wa-text-secondary">
+                      <span>{picker === "emoji" ? "Emoji" : picker === "gif" ? "GIF shortcuts" : "Sticker shortcuts"}</span>
+                      <button onClick={() => setPicker(null)} type="button" className="text-wa-teal">Close</button>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {(picker === "emoji"
+                        ? ["😀", "😂", "😍", "🙏", "🔥", "🎉", "👍", "❤️"]
+                        : picker === "gif"
+                          ? ["[GIF] thumbs up", "[GIF] applause", "[GIF] wow", "[GIF] hello"]
+                          : ["[Sticker] 👍", "[Sticker] 😂", "[Sticker] ❤️", "[Sticker] 🎉"]
+                      ).map((item) => (
+                        <button
+                          key={item}
+                          type="button"
+                          onClick={() => setMessageText((current) => `${current}${current ? " " : ""}${item}`)}
+                          className="rounded-full bg-wa-input-bg px-3 py-2 text-sm text-wa-text transition hover:bg-gray-200"
+                        >
+                          {item}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
                 <form onSubmit={handleSend} className="flex items-center gap-3">
+                  <div className="flex items-center gap-2 text-xl text-wa-icon">
+                    <button type="button" onClick={() => setPicker((current) => current === "emoji" ? null : "emoji")} className="rounded-full p-2 transition hover:bg-white">
+                      😊
+                    </button>
+                    <button type="button" onClick={() => setPicker((current) => current === "gif" ? null : "gif")} className="rounded-full p-2 text-sm font-semibold transition hover:bg-white">
+                      GIF
+                    </button>
+                    <button type="button" onClick={() => setPicker((current) => current === "sticker" ? null : "sticker")} className="rounded-full p-2 transition hover:bg-white">
+                      🪄
+                    </button>
+                  </div>
                   <input
                     data-testid="message-input"
                     type="text"
                     value={messageText}
                     onChange={(e) => setMessageText(e.target.value)}
-                    placeholder={activeChat.is_group ? "Sending for groups is not enabled in this MVP" : "Type a message"}
-                    disabled={activeChat.is_group}
+                    placeholder="Type a message or use @name / @phone for mentions"
                     className="flex-1 rounded-xl border border-transparent bg-white px-4 py-3 text-sm text-wa-text outline-none transition focus:border-wa-teal disabled:cursor-not-allowed disabled:bg-gray-100"
                   />
                   <button
                     data-testid="send-button"
                     type="submit"
-                    disabled={!messageText.trim() || activeChat.is_group}
+                    disabled={!messageText.trim()}
                     className="rounded-full bg-wa-teal p-3 text-white transition hover:bg-wa-teal-dark disabled:cursor-not-allowed disabled:bg-gray-300"
                   >
                     <SendIcon />

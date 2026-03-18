@@ -7,8 +7,11 @@
 //!   GET  /api/bootstrap                → initial UI payload (chats + contacts)
 //!   GET  /api/chats                    → synced chat summaries
 //!   GET  /api/chats/:jid/messages      → messages for a synced chat
+//!   POST /api/chats/:jid/read          → locally mark a chat as read
+//!   POST /api/chats/:jid/typing        → send chat state updates to WhatsApp
 //!   GET  /api/contacts                 → known contacts
 //!   POST /api/messages/send            → send a WhatsApp message
+//!   GET  /api/media/:chat_jid/:msg_id  → download stored media for rendering
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,7 +19,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -24,9 +28,11 @@ use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 
 use whatsapp_rust::bot::Bot;
+use whatsapp_rust::download::MediaType;
 use whatsapp_rust::store::SqliteStore;
 use whatsapp_rust::transport::{TokioWebSocketTransportFactory, UreqHttpClient};
 use whatsapp_rust::types::events::Event;
+use whatsapp_rust::types::presence::{ChatPresence, ReceiptType};
 use whatsapp_rust::waproto::whatsapp as wa;
 use whatsapp_rust::{Client, Jid};
 
@@ -57,6 +63,40 @@ impl AppState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MentionSummary {
+    pub jid: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MediaAttachment {
+    pub kind: String,
+    pub mime_type: Option<String>,
+    pub caption: Option<String>,
+    pub file_name: Option<String>,
+    pub file_length: Option<u64>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub duration_seconds: Option<u32>,
+    pub is_voice_note: bool,
+    pub is_gif: bool,
+    pub is_sticker: bool,
+    pub download_path: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MediaBlob {
+    pub mime_type: Option<String>,
+    pub file_name: Option<String>,
+    pub direct_path: String,
+    pub media_key: Vec<u8>,
+    pub file_sha256: Vec<u8>,
+    pub file_enc_sha256: Vec<u8>,
+    pub file_length: u64,
+    pub media_type: MediaType,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChatMessage {
     pub id: String,
     pub chat_jid: String,
@@ -65,6 +105,9 @@ pub struct ChatMessage {
     pub text: String,
     pub timestamp_ms: i64,
     pub from_me: bool,
+    pub mentions: Vec<MentionSummary>,
+    pub media: Option<MediaAttachment>,
+    pub receipt_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -91,6 +134,9 @@ pub struct ChatSummary {
     pub muted: bool,
     pub avatar_url: Option<String>,
     pub status: Option<String>,
+    pub typing: Option<String>,
+    pub is_online: bool,
+    pub last_seen_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -103,17 +149,23 @@ pub struct ChatRecord {
 pub struct DataStore {
     pub chats: HashMap<String, ChatRecord>,
     pub contacts: HashMap<String, ContactSummary>,
+    pub media: HashMap<String, MediaBlob>,
 }
 
 impl DataStore {
     fn reset(&mut self) {
         self.chats.clear();
         self.contacts.clear();
+        self.media.clear();
     }
 
     fn sorted_chats(&self) -> Vec<ChatSummary> {
         let mut chats: Vec<_> = self.chats.values().map(|chat| chat.summary.clone()).collect();
-        chats.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms).then_with(|| a.name.cmp(&b.name)));
+        chats.sort_by(|a, b| {
+            b.timestamp_ms
+                .cmp(&a.timestamp_ms)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
         chats
     }
 
@@ -127,6 +179,23 @@ impl DataStore {
         self.chats.get(chat_jid).map(|chat| chat.messages.clone())
     }
 
+    fn media_for(&self, chat_jid: &str, message_id: &str) -> Option<MediaBlob> {
+        self.media.get(&media_key(chat_jid, message_id)).cloned()
+    }
+
+    fn display_name_for_jid(&self, jid: &str) -> String {
+        if let Some(contact) = self.contacts.get(jid) {
+            return contact.name.clone();
+        }
+        if let Some(chat) = self.chats.get(jid) {
+            return chat.summary.name.clone();
+        }
+        if let Some(phone) = jid_phone_str(jid) {
+            return format!("+{phone}");
+        }
+        jid.to_string()
+    }
+
     fn ensure_chat(
         &mut self,
         chat_jid: String,
@@ -134,11 +203,7 @@ impl DataStore {
         phone: Option<String>,
         is_group: bool,
     ) -> &mut ChatRecord {
-        let fallback_name = name
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| phone.clone().map(|value| format!("+{value}")))
-            .unwrap_or_else(|| chat_jid.clone());
+        let fallback_name = preferred_display_name(name.as_deref(), phone.as_deref(), &chat_jid);
 
         let record = self
             .chats
@@ -154,8 +219,10 @@ impl DataStore {
                 messages: Vec::new(),
             });
 
-        if let Some(name) = name.filter(|value| !value.trim().is_empty()) {
-            record.summary.name = name;
+        if let Some(ref name_value) = name {
+            if is_better_name(name_value, &record.summary.name, &chat_jid, phone.as_deref()) {
+                record.summary.name = name_value.clone();
+            }
         }
         if let Some(phone) = phone {
             record.summary.phone = Some(phone);
@@ -165,12 +232,14 @@ impl DataStore {
     }
 
     fn upsert_contact(&mut self, contact: ContactSummary) {
+        let contact_jid = contact.jid.clone();
+        let contact_phone = contact.phone.clone();
         let entry = self
             .contacts
             .entry(contact.jid.clone())
             .or_insert_with(|| contact.clone());
 
-        if !contact.name.trim().is_empty() {
+        if is_better_name(&contact.name, &entry.name, &contact_jid, contact_phone.as_deref()) {
             entry.name = contact.name;
         }
         if contact.phone.is_some() {
@@ -222,26 +291,47 @@ impl DataStore {
         phone: Option<String>,
         is_group: bool,
         message: ChatMessage,
+        media_blob: Option<MediaBlob>,
     ) {
-        let preview = Some(message.text.clone());
+        let preview = Some(preview_for_message(&message));
         let timestamp_ms = Some(message.timestamp_ms);
         let from_me = message.from_me;
+        let message_id = message.id.clone();
+        let download_key = media_key(&chat_jid, &message_id);
+        let chat_key = chat_jid.clone();
 
-        let chat = self.ensure_chat(chat_jid, chat_name, phone, is_group);
-        if chat.messages.iter().any(|existing| existing.id == message.id) {
-            return;
+        let mut removed_ids: Vec<String> = Vec::new();
+        {
+            let chat = self.ensure_chat(chat_jid, chat_name, phone, is_group);
+            chat.summary.typing = None;
+            if let Some(existing) = chat.messages.iter_mut().find(|existing| existing.id == message.id) {
+                *existing = message;
+                chat.summary.preview = preview;
+                chat.summary.timestamp_ms = timestamp_ms;
+                if let Some(blob) = media_blob {
+                    self.media.insert(download_key, blob);
+                }
+                return;
+            }
+
+            chat.messages.push(message);
+            if chat.messages.len() > MAX_MESSAGES_PER_CHAT {
+                let overflow = chat.messages.len() - MAX_MESSAGES_PER_CHAT;
+                let removed: Vec<ChatMessage> = chat.messages.drain(0..overflow).collect();
+                removed_ids = removed.into_iter().map(|item| item.id).collect();
+            }
+            chat.summary.preview = preview;
+            chat.summary.timestamp_ms = timestamp_ms;
+            if !from_me {
+                chat.summary.unread_count = chat.summary.unread_count.saturating_add(1);
+            }
         }
 
-        chat.messages.push(message);
-        if chat.messages.len() > MAX_MESSAGES_PER_CHAT {
-            let overflow = chat.messages.len() - MAX_MESSAGES_PER_CHAT;
-            chat.messages.drain(0..overflow);
+        for removed_id in removed_ids {
+            self.media.remove(&media_key(&chat_key, &removed_id));
         }
-
-        chat.summary.preview = preview;
-        chat.summary.timestamp_ms = timestamp_ms;
-        if !from_me {
-            chat.summary.unread_count = chat.summary.unread_count.saturating_add(1);
+        if let Some(blob) = media_blob {
+            self.media.insert(download_key, blob);
         }
     }
 
@@ -260,6 +350,32 @@ impl DataStore {
     fn set_muted(&mut self, chat_jid: &str, muted: bool) {
         if let Some(chat) = self.chats.get_mut(chat_jid) {
             chat.summary.muted = muted;
+        }
+    }
+
+    fn set_typing(&mut self, chat_jid: &str, typing: Option<String>) {
+        if let Some(chat) = self.chats.get_mut(chat_jid) {
+            chat.summary.typing = typing;
+        }
+    }
+
+    fn set_presence(&mut self, jid: &str, is_online: bool, last_seen_ms: Option<i64>) {
+        if let Some(chat) = self.chats.get_mut(jid) {
+            chat.summary.is_online = is_online;
+            chat.summary.last_seen_ms = last_seen_ms;
+        }
+    }
+
+    fn update_message_receipt(&mut self, chat_jid: &str, message_ids: &[String], receipt_status: &str) {
+        if let Some(chat) = self.chats.get_mut(chat_jid) {
+            for message in &mut chat.messages {
+                if message.from_me && message_ids.iter().any(|id| id == &message.id) {
+                    message.receipt_status = Some(promote_receipt_status(
+                        message.receipt_status.as_deref(),
+                        receipt_status,
+                    ));
+                }
+            }
         }
     }
 }
@@ -303,8 +419,16 @@ pub struct ChatsResponse {
 
 #[derive(Deserialize)]
 pub struct SendMessageRequest {
-    pub phone: String,
+    pub phone: Option<String>,
+    pub jid: Option<String>,
     pub message: String,
+    #[serde(default)]
+    pub mentions: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct TypingRequest {
+    pub state: String,
 }
 
 #[derive(Serialize)]
@@ -382,6 +506,139 @@ pub async fn get_chat_messages(
     Ok(Json(MessagesResponse { messages }))
 }
 
+pub async fn mark_chat_read(
+    Path(chat_jid): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let mut store = state.store.write().await;
+    if !store.chats.contains_key(&chat_jid) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Chat not found".into(),
+            }),
+        ));
+    }
+    store.mark_read(&chat_jid);
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
+pub async fn update_typing(
+    Path(chat_jid): Path<String>,
+    State(state): State<AppState>,
+    Json(payload): Json<TypingRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if !state.is_connected.load(Ordering::SeqCst) {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "WhatsApp is not connected.".into(),
+            }),
+        ));
+    }
+
+    let client_guard = state.client.read().await;
+    let client = client_guard.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "WhatsApp client not yet initialised".into(),
+            }),
+        )
+    })?;
+
+    let jid: Jid = chat_jid.parse().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid chat JID".into(),
+            }),
+        )
+    })?;
+
+    let result = match payload.state.as_str() {
+        "composing" => client.chatstate().send_composing(&jid).await,
+        "recording" => client.chatstate().send_recording(&jid).await,
+        _ => client.chatstate().send_paused(&jid).await,
+    };
+
+    result.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to update typing state: {e}"),
+            }),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
+pub async fn get_media(
+    Path((chat_jid, message_id)): Path<(String, String)>,
+    State(state): State<AppState>,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let blob = {
+        let store = state.store.read().await;
+        store.media_for(&chat_jid, &message_id)
+    }
+    .ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Media not found".into(),
+            }),
+        )
+    })?;
+
+    let client_guard = state.client.read().await;
+    let client = client_guard.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "WhatsApp client not yet initialised".into(),
+            }),
+        )
+    })?;
+
+    let bytes = client
+        .download_from_params(
+            &blob.direct_path,
+            &blob.media_key,
+            &blob.file_sha256,
+            &blob.file_enc_sha256,
+            blob.file_length,
+            blob.media_type,
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!("Failed to download media: {e}"),
+                }),
+            )
+        })?;
+
+    let mut response = bytes.into_response();
+    let mime_type = blob
+        .mime_type
+        .clone()
+        .unwrap_or_else(|| default_mime_for_media_type(blob.media_type).to_string());
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&mime_type)
+            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+    );
+    if let Some(file_name) = blob.file_name {
+        if let Ok(value) = HeaderValue::from_str(&format!("inline; filename=\"{file_name}\"")) {
+            response.headers_mut().insert(header::CONTENT_DISPOSITION, value);
+        }
+    }
+
+    Ok(response)
+}
+
 pub async fn logout(
     State(state): State<AppState>,
 ) -> Result<Json<LogoutResponse>, (StatusCode, Json<ErrorResponse>)> {
@@ -410,18 +667,8 @@ pub async fn send_message(
     State(state): State<AppState>,
     Json(payload): Json<SendMessageRequest>,
 ) -> Result<Json<SendMessageResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let phone = normalize_phone(&payload.phone);
-
-    if phone.is_empty() || !phone.chars().all(|c| c.is_ascii_digit()) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "\"phone\" is required and must contain only digits (E.164 format)".into(),
-            }),
-        ));
-    }
-
-    if payload.message.trim().is_empty() {
+    let trimmed_message = payload.message.trim();
+    if trimmed_message.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -429,6 +676,34 @@ pub async fn send_message(
             }),
         ));
     }
+
+    let target_jid = if let Some(jid) = payload.jid.as_deref().filter(|value| !value.trim().is_empty()) {
+        jid.parse::<Jid>().map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "\"jid\" is invalid".into(),
+                }),
+            )
+        })?
+    } else {
+        let phone = normalize_phone(payload.phone.as_deref().unwrap_or_default());
+        if phone.is_empty() || !phone.chars().all(|c| c.is_ascii_digit()) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Provide a valid \"jid\" or a digit-only \"phone\" (E.164 format).".into(),
+                }),
+            ));
+        }
+        Jid::pn(&phone)
+    };
+
+    let mention_jids: Vec<String> = payload
+        .mentions
+        .iter()
+        .filter_map(|jid| jid.parse::<Jid>().ok().map(|parsed| parsed.to_non_ad().to_string()))
+        .collect();
 
     if !state.is_connected.load(Ordering::SeqCst) {
         return Err((
@@ -449,42 +724,78 @@ pub async fn send_message(
         )
     })?;
 
-    let jid = Jid::pn(&phone);
-    let wa_message = wa::Message {
-        conversation: Some(payload.message.clone()),
-        ..Default::default()
+    let wa_message = if mention_jids.is_empty() {
+        wa::Message {
+            conversation: Some(trimmed_message.to_string()),
+            ..Default::default()
+        }
+    } else {
+        wa::Message {
+            extended_text_message: Some(Box::new(wa::message::ExtendedTextMessage {
+                text: Some(trimmed_message.to_string()),
+                context_info: Some(Box::new(wa::ContextInfo {
+                    mentioned_jid: mention_jids.clone(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
     };
 
-    match client.send_message(jid.clone(), wa_message).await {
+    match client.send_message(target_jid.clone(), wa_message).await {
         Ok(msg_id) => {
+            let chat_jid = target_jid.to_non_ad().to_string();
+            let phone = jid_phone(&target_jid.to_non_ad());
+            let is_group = jid_is_group(&target_jid);
+            let mention_summaries = {
+                let store = state.store.read().await;
+                mention_jids
+                    .iter()
+                    .map(|jid| MentionSummary {
+                        jid: jid.clone(),
+                        name: store.display_name_for_jid(jid),
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            let current_display_name = {
+                let store = state.store.read().await;
+                store.display_name_for_jid(&chat_jid)
+            };
             let mut store = state.store.write().await;
-            let chat_jid = jid.to_string();
             let timestamp_ms = now_ms();
 
-            store.upsert_contact(ContactSummary {
-                jid: chat_jid.clone(),
-                name: format!("+{phone}"),
-                phone: Some(phone.clone()),
-                status: None,
-                avatar_url: None,
-                is_business: false,
-                is_registered: true,
-            });
+            if !is_group {
+                store.upsert_contact(ContactSummary {
+                    jid: chat_jid.clone(),
+                    name: preferred_display_name(Some(&current_display_name), phone.as_deref(), &chat_jid),
+                    phone: phone.clone(),
+                    status: None,
+                    avatar_url: None,
+                    is_business: false,
+                    is_registered: true,
+                });
+            }
 
             store.record_message(
                 chat_jid.clone(),
-                Some(format!("+{phone}")),
-                Some(phone),
-                false,
+                Some(current_display_name),
+                phone,
+                is_group,
                 ChatMessage {
                     id: msg_id.clone(),
                     chat_jid,
                     sender_jid: "me".into(),
                     sender_name: Some("You".into()),
-                    text: payload.message,
+                    text: trimmed_message.to_string(),
                     timestamp_ms,
                     from_me: true,
+                    mentions: mention_summaries,
+                    media: None,
+                    receipt_status: Some("sent".into()),
                 },
+                None,
             );
 
             Ok(Json(SendMessageResponse {
@@ -512,8 +823,11 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/bootstrap", get(get_bootstrap))
         .route("/api/chats", get(get_chats))
         .route("/api/chats/:jid/messages", get(get_chat_messages))
+    .route("/api/chats/:jid/read", post(mark_chat_read))
+    .route("/api/chats/:jid/typing", post(update_typing))
         .route("/api/contacts", get(get_contacts))
         .route("/api/messages/send", post(send_message))
+    .route("/api/media/:chat_jid/:message_id", get(get_media))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -531,6 +845,128 @@ fn now_ms() -> i64 {
 
 fn message_timestamp_ms(info: &whatsapp_rust::types::message::MessageInfo) -> i64 {
     info.timestamp.timestamp_millis()
+}
+
+fn jid_phone_str(jid: &str) -> Option<String> {
+    if jid.contains("@s.whatsapp.net") {
+        Some(jid.split('@').next().unwrap_or_default().to_string())
+    } else if jid.contains("@lid") {
+        let user = jid.split('@').next().unwrap_or_default();
+        let base_user = user.split(':').next().unwrap_or(user);
+        if !base_user.is_empty() && base_user.chars().all(|ch| ch.is_ascii_digit()) {
+            Some(base_user.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+fn preferred_display_name(name: Option<&str>, phone: Option<&str>, jid: &str) -> String {
+    if let Some(value) = name.filter(|value| !value.trim().is_empty()) {
+        return value.to_string();
+    }
+    if let Some(value) = phone.filter(|value| !value.is_empty()) {
+        return format!("+{value}");
+    }
+    jid.to_string()
+}
+
+fn looks_like_fallback_name(name: &str, jid: &str, phone: Option<&str>) -> bool {
+    if name.trim().is_empty() || name == jid {
+        return true;
+    }
+    if let Some(phone) = phone {
+        return name == phone || name == format!("+{phone}");
+    }
+    false
+}
+
+fn is_better_name(candidate: &str, current: &str, jid: &str, phone: Option<&str>) -> bool {
+    if candidate.trim().is_empty() {
+        return false;
+    }
+    if current.trim().is_empty() {
+        return true;
+    }
+    let candidate_fallback = looks_like_fallback_name(candidate, jid, phone);
+    let current_fallback = looks_like_fallback_name(current, jid, phone);
+    (!candidate_fallback && current_fallback) || (!candidate_fallback && !current_fallback)
+}
+
+fn media_key(chat_jid: &str, message_id: &str) -> String {
+    format!("{chat_jid}:{message_id}")
+}
+
+fn receipt_rank(status: &str) -> usize {
+    match status {
+        "sent" => 1,
+        "delivered" => 2,
+        "read" => 3,
+        "played" => 4,
+        _ => 0,
+    }
+}
+
+fn promote_receipt_status(current: Option<&str>, new_status: &str) -> String {
+    match current {
+        Some(existing) if receipt_rank(existing) >= receipt_rank(new_status) => existing.to_string(),
+        _ => new_status.to_string(),
+    }
+}
+
+fn preview_for_message(message: &ChatMessage) -> String {
+    if let Some(media) = &message.media {
+        match media.kind.as_str() {
+            "image" => media.caption.clone().unwrap_or_else(|| "📷 Photo".into()),
+            "video" => media.caption.clone().unwrap_or_else(|| {
+                if media.is_gif {
+                    "🎞️ GIF".into()
+                } else {
+                    "🎥 Video".into()
+                }
+            }),
+            "document" => media
+                .file_name
+                .clone()
+                .map(|name| format!("📎 {name}"))
+                .unwrap_or_else(|| "📎 Document".into()),
+            "audio" => {
+                if media.is_voice_note {
+                    "🎤 Voice note".into()
+                } else {
+                    "🎵 Audio".into()
+                }
+            }
+            "sticker" => "🪄 Sticker".into(),
+            _ => message.text.clone(),
+        }
+    } else {
+        message.text.clone()
+    }
+}
+
+fn extract_context_info(message: &wa::Message) -> Option<&wa::ContextInfo> {
+    if let Some(value) = message.extended_text_message.as_ref().and_then(|value| value.context_info.as_deref()) {
+        return Some(value);
+    }
+    if let Some(value) = message.image_message.as_ref().and_then(|value| value.context_info.as_deref()) {
+        return Some(value);
+    }
+    if let Some(value) = message.video_message.as_ref().and_then(|value| value.context_info.as_deref()) {
+        return Some(value);
+    }
+    if let Some(value) = message.document_message.as_ref().and_then(|value| value.context_info.as_deref()) {
+        return Some(value);
+    }
+    if let Some(value) = message.audio_message.as_ref().and_then(|value| value.context_info.as_deref()) {
+        return Some(value);
+    }
+    if let Some(value) = message.sticker_message.as_ref().and_then(|value| value.context_info.as_deref()) {
+        return Some(value);
+    }
+    None
 }
 
 fn extract_text(message: &wa::Message) -> String {
@@ -551,7 +987,7 @@ fn extract_text(message: &wa::Message) -> String {
         .and_then(|value| value.caption.clone())
         .filter(|value| !value.is_empty())
     {
-        return format!("📷 {caption}");
+        return caption;
     }
     if let Some(caption) = message
         .video_message
@@ -559,43 +995,254 @@ fn extract_text(message: &wa::Message) -> String {
         .and_then(|value| value.caption.clone())
         .filter(|value| !value.is_empty())
     {
-        return format!("🎥 {caption}");
+        return caption;
+    }
+    if let Some(caption) = message
+        .document_message
+        .as_ref()
+        .and_then(|value| value.caption.clone())
+        .filter(|value| !value.is_empty())
+    {
+        return caption;
+    }
+    if let Some(file_name) = message
+        .document_message
+        .as_ref()
+        .and_then(|value| value.file_name.clone())
+        .filter(|value| !value.is_empty())
+    {
+        return file_name;
     }
     if message.audio_message.is_some() {
-        return "🎵 Voice message".into();
-    }
-    if message.document_message.is_some() {
-        return "📎 Document".into();
+        return "Voice message".into();
     }
     if message.sticker_message.is_some() {
-        return "🪄 Sticker".into();
+        return "Sticker".into();
     }
     "<non-text>".into()
 }
 
 fn jid_phone(jid: &Jid) -> Option<String> {
-    let jid_str = jid.to_string();
-    if jid_str.contains("@s.whatsapp.net") {
-        Some(jid_str.split('@').next().unwrap_or_default().to_string())
-    } else {
-        None
-    }
+    jid_phone_str(&jid.to_string())
 }
 
 fn jid_is_group(jid: &Jid) -> bool {
     jid.to_string().ends_with("@g.us")
 }
 
+fn build_media_blob(
+    mime_type: Option<String>,
+    file_name: Option<String>,
+    direct_path: Option<String>,
+    media_key: Option<Vec<u8>>,
+    file_sha256: Option<Vec<u8>>,
+    file_enc_sha256: Option<Vec<u8>>,
+    file_length: Option<u64>,
+    media_type: MediaType,
+) -> Option<MediaBlob> {
+    Some(MediaBlob {
+        mime_type,
+        file_name,
+        direct_path: direct_path?,
+        media_key: media_key?,
+        file_sha256: file_sha256?,
+        file_enc_sha256: file_enc_sha256?,
+        file_length: file_length?,
+        media_type,
+    })
+}
+
+fn extract_media(message: &wa::Message, chat_jid: &str, message_id: &str) -> Option<(MediaAttachment, MediaBlob)> {
+    if let Some(image) = message.image_message.as_ref() {
+        let blob = build_media_blob(
+            image.mimetype.clone(),
+            None,
+            image.direct_path.clone(),
+            image.media_key.clone(),
+            image.file_sha256.clone(),
+            image.file_enc_sha256.clone(),
+            image.file_length,
+            MediaType::Image,
+        )?;
+        return Some((
+            MediaAttachment {
+                kind: "image".into(),
+                mime_type: image.mimetype.clone(),
+                caption: image.caption.clone(),
+                file_name: None,
+                file_length: image.file_length,
+                width: image.width,
+                height: image.height,
+                duration_seconds: None,
+                is_voice_note: false,
+                is_gif: false,
+                is_sticker: false,
+                download_path: Some(format!("/api/media/{chat_jid}/{message_id}")),
+            },
+            blob,
+        ));
+    }
+    if let Some(video) = message.video_message.as_ref() {
+        let blob = build_media_blob(
+            video.mimetype.clone(),
+            None,
+            video.direct_path.clone(),
+            video.media_key.clone(),
+            video.file_sha256.clone(),
+            video.file_enc_sha256.clone(),
+            video.file_length,
+            MediaType::Video,
+        )?;
+        return Some((
+            MediaAttachment {
+                kind: "video".into(),
+                mime_type: video.mimetype.clone(),
+                caption: video.caption.clone(),
+                file_name: None,
+                file_length: video.file_length,
+                width: video.width,
+                height: video.height,
+                duration_seconds: video.seconds,
+                is_voice_note: false,
+                is_gif: video.gif_playback.unwrap_or(false),
+                is_sticker: false,
+                download_path: Some(format!("/api/media/{chat_jid}/{message_id}")),
+            },
+            blob,
+        ));
+    }
+    if let Some(document) = message.document_message.as_ref() {
+        let blob = build_media_blob(
+            document.mimetype.clone(),
+            document.file_name.clone(),
+            document.direct_path.clone(),
+            document.media_key.clone(),
+            document.file_sha256.clone(),
+            document.file_enc_sha256.clone(),
+            document.file_length,
+            MediaType::Document,
+        )?;
+        return Some((
+            MediaAttachment {
+                kind: "document".into(),
+                mime_type: document.mimetype.clone(),
+                caption: document.caption.clone(),
+                file_name: document.file_name.clone(),
+                file_length: document.file_length,
+                width: None,
+                height: None,
+                duration_seconds: None,
+                is_voice_note: false,
+                is_gif: false,
+                is_sticker: false,
+                download_path: Some(format!("/api/media/{chat_jid}/{message_id}")),
+            },
+            blob,
+        ));
+    }
+    if let Some(audio) = message.audio_message.as_ref() {
+        let blob = build_media_blob(
+            audio.mimetype.clone(),
+            None,
+            audio.direct_path.clone(),
+            audio.media_key.clone(),
+            audio.file_sha256.clone(),
+            audio.file_enc_sha256.clone(),
+            audio.file_length,
+            MediaType::Audio,
+        )?;
+        return Some((
+            MediaAttachment {
+                kind: "audio".into(),
+                mime_type: audio.mimetype.clone(),
+                caption: None,
+                file_name: None,
+                file_length: audio.file_length,
+                width: None,
+                height: None,
+                duration_seconds: audio.seconds,
+                is_voice_note: audio.ptt.unwrap_or(false),
+                is_gif: false,
+                is_sticker: false,
+                download_path: Some(format!("/api/media/{chat_jid}/{message_id}")),
+            },
+            blob,
+        ));
+    }
+    if let Some(sticker) = message.sticker_message.as_ref() {
+        let mime = sticker.mimetype.clone().or_else(|| Some("image/webp".into()));
+        let blob = build_media_blob(
+            mime.clone(),
+            None,
+            sticker.direct_path.clone(),
+            sticker.media_key.clone(),
+            sticker.file_sha256.clone(),
+            sticker.file_enc_sha256.clone(),
+            sticker.file_length,
+            MediaType::Sticker,
+        )?;
+        return Some((
+            MediaAttachment {
+                kind: "sticker".into(),
+                mime_type: mime,
+                caption: None,
+                file_name: None,
+                file_length: sticker.file_length,
+                width: None,
+                height: None,
+                duration_seconds: None,
+                is_voice_note: false,
+                is_gif: false,
+                is_sticker: true,
+                download_path: Some(format!("/api/media/{chat_jid}/{message_id}")),
+            },
+            blob,
+        ));
+    }
+    None
+}
+
+fn default_mime_for_media_type(media_type: MediaType) -> &'static str {
+    match media_type {
+        MediaType::Image => "image/jpeg",
+        MediaType::Video => "video/mp4",
+        MediaType::Audio => "audio/mpeg",
+        MediaType::Document => "application/octet-stream",
+        MediaType::Sticker => "image/webp",
+        _ => "application/octet-stream",
+    }
+}
+
+async fn ensure_presence_subscription(client: Arc<Client>, jid: Jid) {
+    if !jid_is_group(&jid) {
+        let _ = client.presence().subscribe(&jid).await;
+    }
+}
+
 async fn refresh_contact_profile(state: AppState, client: Arc<Client>, jid: Jid) {
     let lookup_jid = jid.to_non_ad();
-    let phone = jid_phone(&lookup_jid);
+    let lookup_jid_str = lookup_jid.to_string();
+    let resolved_lid_phone = if lookup_jid.server == "lid" {
+        client.get_phone_number_from_lid(&lookup_jid_str).await
+    } else {
+        None
+    };
+    let phone = jid_phone(&lookup_jid).or(resolved_lid_phone.clone());
+    let existing_name = {
+        let store = state.store.read().await;
+        store
+            .contacts
+            .get(&lookup_jid_str)
+            .map(|contact| contact.name.clone())
+    };
+
+    let mut alias_jids = vec![lookup_jid_str.clone()];
 
     let mut updated_contact = ContactSummary {
-        jid: lookup_jid.to_string(),
-        name: phone
-            .clone()
-            .map(|value| format!("+{value}"))
-            .unwrap_or_else(|| lookup_jid.to_string()),
+        jid: lookup_jid_str.clone(),
+        name: existing_name
+            .filter(|name| !looks_like_fallback_name(name, &lookup_jid_str, phone.as_deref()))
+            .unwrap_or_else(|| preferred_display_name(None, phone.as_deref(), &lookup_jid_str)),
         phone: phone.clone(),
         status: None,
         avatar_url: None,
@@ -611,6 +1258,9 @@ async fn refresh_contact_profile(state: AppState, client: Arc<Client>, jid: Jid)
                 updated_contact.status = info.status.clone();
                 updated_contact.is_business = info.is_business;
                 updated_contact.is_registered = info.is_registered;
+                if let Some(lid) = info.lid {
+                    alias_jids.push(lid.to_non_ad().to_string());
+                }
             }
         }
     }
@@ -620,8 +1270,15 @@ async fn refresh_contact_profile(state: AppState, client: Arc<Client>, jid: Jid)
             updated_contact.jid = info.jid.to_string();
             updated_contact.status = info.status.clone().or(updated_contact.status.clone());
             updated_contact.is_business = info.is_business;
+            if let Some(lid) = &info.lid {
+                alias_jids.push(lid.to_non_ad().to_string());
+            }
         }
     }
+
+    alias_jids.push(updated_contact.jid.clone());
+    alias_jids.sort();
+    alias_jids.dedup();
 
     if let Ok(Some(picture)) = client.contacts().get_profile_picture(&lookup_jid, true).await {
         updated_contact.avatar_url = Some(picture.url);
@@ -634,19 +1291,31 @@ async fn refresh_contact_profile(state: AppState, client: Arc<Client>, jid: Jid)
     let contact_avatar = updated_contact.avatar_url.clone();
 
     let mut store = state.store.write().await;
-    store.upsert_contact(updated_contact);
-    if let Some(chat) = store.chats.get_mut(&contact_jid) {
-        if !contact_name.trim().is_empty() {
-            chat.summary.name = contact_name;
-        }
-        if contact_phone.is_some() {
-            chat.summary.phone = contact_phone;
-        }
-        if contact_status.is_some() {
-            chat.summary.status = contact_status;
-        }
-        if contact_avatar.is_some() {
-            chat.summary.avatar_url = contact_avatar;
+    store.upsert_contact(updated_contact.clone());
+    for alias_jid in alias_jids {
+        store.upsert_contact(ContactSummary {
+            jid: alias_jid.clone(),
+            name: contact_name.clone(),
+            phone: contact_phone.clone(),
+            status: contact_status.clone(),
+            avatar_url: contact_avatar.clone(),
+            is_business: updated_contact.is_business,
+            is_registered: updated_contact.is_registered,
+        });
+
+        if let Some(chat) = store.chats.get_mut(&alias_jid) {
+            if is_better_name(&contact_name, &chat.summary.name, &contact_jid, contact_phone.as_deref()) {
+                chat.summary.name = contact_name.clone();
+            }
+            if contact_phone.is_some() {
+                chat.summary.phone = contact_phone.clone();
+            }
+            if contact_status.is_some() {
+                chat.summary.status = contact_status.clone();
+            }
+            if contact_avatar.is_some() {
+                chat.summary.avatar_url = contact_avatar.clone();
+            }
         }
     }
 }
@@ -657,6 +1326,23 @@ async fn refresh_group_metadata(state: AppState, client: Arc<Client>, jid: Jid) 
         let chat = store.ensure_chat(jid.to_string(), Some(group.subject.clone()), None, true);
         chat.summary.name = group.subject;
         chat.summary.is_group = true;
+    }
+
+    if let Ok(group_info) = client.groups().query_info(&jid).await {
+        let mut participant_jids = Vec::new();
+        for participant in &group_info.participants {
+            participant_jids.push(participant.to_non_ad());
+        }
+        for (lid_user, phone_jid) in group_info.lid_to_pn_map() {
+            participant_jids.push(Jid::new(lid_user, "lid").to_non_ad());
+            participant_jids.push(phone_jid.to_non_ad());
+        }
+        for participant in participant_jids {
+            if !jid_is_group(&participant) {
+                tokio::spawn(refresh_contact_profile(state.clone(), client.clone(), participant.clone()));
+                tokio::spawn(ensure_presence_subscription(client.clone(), participant));
+            }
+        }
     }
 }
 
@@ -676,6 +1362,7 @@ async fn refresh_all_known_contacts(state: AppState, client: Arc<Client>) {
             if jid_is_group(&parsed) {
                 refresh_group_metadata(state.clone(), client.clone(), parsed).await;
             } else {
+                ensure_presence_subscription(client.clone(), parsed.clone()).await;
                 refresh_contact_profile(state.clone(), client.clone(), parsed).await;
             }
         }
@@ -697,17 +1384,37 @@ async fn handle_incoming_message(
     msg: Box<wa::Message>,
     info: whatsapp_rust::types::message::MessageInfo,
 ) {
-    let text = extract_text(&msg);
     let chat = info.source.chat.to_non_ad();
     let chat_jid = chat.to_string();
-    let sender_jid = info.source.sender.to_string();
+    let sender = info.source.sender.to_non_ad();
+    let sender_jid = sender.to_string();
     let phone = jid_phone(&chat);
+    let sender_phone = jid_phone(&sender);
     let display_name = if !info.push_name.trim().is_empty() {
         info.push_name.clone()
-    } else if let Some(phone) = phone.clone() {
-        format!("+{phone}")
     } else {
-        chat_jid.clone()
+        let store = state.store.read().await;
+        store.display_name_for_jid(&sender_jid)
+    };
+    let text = extract_text(&msg);
+    let (mentions, media, media_blob) = {
+        let store = state.store.read().await;
+        let mentions = extract_context_info(&msg)
+            .map(|ctx| {
+                ctx.mentioned_jid
+                    .iter()
+                    .map(|jid| MentionSummary {
+                        jid: jid.clone(),
+                        name: store.display_name_for_jid(jid),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let media = extract_media(&msg, &chat_jid, &info.id);
+        match media {
+            Some((attachment, blob)) => (mentions, Some(attachment), Some(blob)),
+            None => (mentions, None, None),
+        }
     };
 
     {
@@ -722,28 +1429,62 @@ async fn handle_incoming_message(
                 is_business: false,
                 is_registered: true,
             });
+        } else {
+            store.upsert_contact(ContactSummary {
+                jid: sender_jid.clone(),
+                name: display_name.clone(),
+                phone: sender_phone.clone(),
+                status: None,
+                avatar_url: None,
+                is_business: false,
+                is_registered: true,
+            });
         }
+
+        if !info.push_name.trim().is_empty() {
+            store.rename_contact(&sender_jid, &info.push_name);
+        }
+
+        let chat_display_name = if jid_is_group(&chat) {
+            store.display_name_for_jid(&chat_jid)
+        } else {
+            display_name.clone()
+        };
 
         store.record_message(
             chat_jid.clone(),
-            Some(display_name),
+            Some(chat_display_name),
             phone,
             jid_is_group(&chat),
             ChatMessage {
                 id: info.id.clone(),
                 chat_jid: chat_jid.clone(),
                 sender_jid,
-                sender_name: (!info.push_name.trim().is_empty()).then_some(info.push_name.clone()),
+                sender_name: if jid_is_group(&chat) {
+                    Some(display_name.clone())
+                } else {
+                    (!display_name.trim().is_empty()).then_some(display_name.clone())
+                },
                 text,
                 timestamp_ms: message_timestamp_ms(&info),
                 from_me: info.source.is_from_me,
+                mentions,
+                media,
+                receipt_status: if info.source.is_from_me {
+                    Some("sent".into())
+                } else {
+                    None
+                },
             },
+            media_blob,
         );
     }
 
     if jid_is_group(&chat) {
-        tokio::spawn(refresh_group_metadata(state, client, chat));
+        tokio::spawn(refresh_group_metadata(state.clone(), client.clone(), chat));
+        tokio::spawn(refresh_contact_profile(state, client, sender));
     } else {
+        tokio::spawn(ensure_presence_subscription(client.clone(), chat.clone()));
         tokio::spawn(refresh_contact_profile(state, client, chat));
     }
 }
@@ -787,6 +1528,51 @@ async fn main() -> anyhow::Result<()> {
                         let preview = extract_text(&msg);
                         log::info!("📩 Message from {}: {}", info.source.sender, preview);
                         handle_incoming_message(state.clone(), client.clone(), msg, info).await;
+                    }
+                    Event::Receipt(receipt) => {
+                        let status = match receipt.r#type {
+                            ReceiptType::Sender => Some("sent"),
+                            ReceiptType::Delivered => Some("delivered"),
+                            ReceiptType::Read | ReceiptType::ReadSelf => Some("read"),
+                            ReceiptType::Played | ReceiptType::PlayedSelf => Some("played"),
+                            _ => None,
+                        };
+                        if let Some(status) = status {
+                            let mut store = state.store.write().await;
+                            store.update_message_receipt(
+                                &receipt.source.chat.to_non_ad().to_string(),
+                                &receipt.message_ids,
+                                status,
+                            );
+                        }
+                    }
+                    Event::ChatPresence(update) => {
+                        let chat_jid = update.source.chat.to_non_ad().to_string();
+                        let typing = match update.state {
+                            ChatPresence::Composing => {
+                                if update.source.is_group {
+                                    let sender_jid = update.source.sender.to_non_ad().to_string();
+                                    let sender_name = {
+                                        let store = state.store.read().await;
+                                        store.display_name_for_jid(&sender_jid)
+                                    };
+                                    Some(format!("{sender_name} is typing…"))
+                                } else {
+                                    Some("typing…".into())
+                                }
+                            }
+                            ChatPresence::Paused => None,
+                        };
+                        let mut store = state.store.write().await;
+                        store.set_typing(&chat_jid, typing);
+                    }
+                    Event::Presence(update) => {
+                        let mut store = state.store.write().await;
+                        store.set_presence(
+                            &update.from.to_non_ad().to_string(),
+                            !update.unavailable,
+                            update.last_seen.map(|value| value.timestamp_millis()),
+                        );
                     }
                     Event::JoinedGroup(conversation) => {
                         if let Some(conv) = conversation.get() {
@@ -978,7 +1764,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_rejects_empty_phone() {
+    async fn send_rejects_empty_target() {
         let app = create_router(connected_state_no_client());
         let resp = app
             .oneshot(json_post(
@@ -990,7 +1776,7 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let json = body_json(resp.into_body()).await;
-        assert!(json["error"].as_str().unwrap().contains("phone"));
+    assert!(json["error"].as_str().unwrap().contains("jid"));
     }
 
     #[tokio::test]
@@ -1075,7 +1861,21 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let json = body_json(resp.into_body()).await;
-        assert!(json["error"].as_str().unwrap().contains("digits"));
+        assert!(json["error"].as_str().unwrap().contains("digit"));
+    }
+
+    #[tokio::test]
+    async fn send_accepts_jid_shape() {
+        let app = create_router(connected_state_no_client());
+        let resp = app
+            .oneshot(json_post(
+                "/api/messages/send",
+                r#"{"jid":"15551234567@s.whatsapp.net","message":"hello"}"#,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
