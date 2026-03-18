@@ -105,10 +105,11 @@ function normalizeMessage(input: Partial<ApiMessage> | null | undefined): ApiMes
 }
 
 function normalizeChat(input: Partial<ApiChat> | null | undefined): ApiChat {
+  const derivedPhone = input?.phone ?? phoneFromJid(input?.jid ?? null);
   return {
     jid: input?.jid ?? "",
-    name: input?.name ?? input?.phone ?? input?.jid ?? "Unknown",
-    phone: input?.phone ?? null,
+    name: input?.name ?? derivedPhone ?? input?.jid ?? "Unknown",
+    phone: derivedPhone,
     is_group: Boolean(input?.is_group),
     preview: input?.preview ?? null,
     timestamp_ms: input?.timestamp_ms ?? null,
@@ -124,10 +125,11 @@ function normalizeChat(input: Partial<ApiChat> | null | undefined): ApiChat {
 }
 
 function normalizeContact(input: Partial<ApiContact> | null | undefined): ApiContact {
+  const derivedPhone = input?.phone ?? phoneFromJid(input?.jid ?? null);
   return {
     jid: input?.jid ?? "",
-    name: input?.name ?? input?.phone ?? input?.jid ?? "Unknown",
-    phone: input?.phone ?? null,
+    name: input?.name ?? derivedPhone ?? input?.jid ?? "Unknown",
+    phone: derivedPhone,
     status: input?.status ?? null,
     avatar_url: input?.avatar_url ?? null,
     is_business: Boolean(input?.is_business),
@@ -226,7 +228,16 @@ function initials(name: string) {
 
 function phoneFromJid(jid: string | null) {
   if (!jid) return null;
-  return jid.endsWith("@s.whatsapp.net") ? jid.split("@")[0] : null;
+  if (jid.endsWith("@s.whatsapp.net")) return jid.split("@")[0];
+  return null;
+}
+
+function displayName(name: string | null | undefined, jid: string, phone?: string | null) {
+  const trimmed = name?.trim();
+  if (trimmed && trimmed !== jid) return trimmed;
+  const fallbackPhone = phone ?? phoneFromJid(jid);
+  if (fallbackPhone) return `+${fallbackPhone}`;
+  return trimmed || jid;
 }
 
 function makeManualChat(phone: string): ApiChat {
@@ -261,15 +272,27 @@ function formatFileSize(bytes: number | null) {
 }
 
 function formatPresence(chat: ApiChat) {
-  if (chat.typing) return chat.typing;
-  if (chat.is_online) return "online";
+  const phoneLabel = !chat.is_group && chat.phone ? `+${chat.phone}` : null;
+
+  if (chat.typing) {
+    return phoneLabel ? `${chat.typing} · ${phoneLabel}` : chat.typing;
+  }
+  if (chat.is_online) {
+    return phoneLabel ? `online · ${phoneLabel}` : "online";
+  }
   if (chat.last_seen_ms) {
-    return `last seen ${new Date(chat.last_seen_ms).toLocaleTimeString([], {
+    const lastSeen = `last seen ${new Date(chat.last_seen_ms).toLocaleTimeString([], {
       hour: "2-digit",
       minute: "2-digit",
     })}`;
+    return phoneLabel ? `${lastSeen} · ${phoneLabel}` : lastSeen;
   }
-  return chat.status ?? (chat.is_group ? "Synced group" : chat.phone ? `+${chat.phone}` : chat.jid);
+
+  if (chat.status && phoneLabel) {
+    return `${chat.status} · ${phoneLabel}`;
+  }
+
+  return chat.status ?? (chat.is_group ? "Synced group" : phoneLabel ?? displayName(chat.name, chat.jid, chat.phone));
 }
 
 function getReceiptIcon(status: string | null) {
@@ -820,6 +843,9 @@ export default function Home() {
                 </div>
               ) : (
                 filteredChats.map((chat) => (
+                  (() => {
+                    const shownName = displayName(chat.name, chat.jid, chat.phone);
+                    return (
                   <button
                     key={chat.jid}
                     onClick={() => void handleSelectChat(chat.jid)}
@@ -830,14 +856,14 @@ export default function Home() {
                   >
                     <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-full bg-[#dfe5e7] text-sm font-semibold text-wa-text">
                       {chat.avatar_url ? (
-                        <img src={chat.avatar_url} alt={chat.name} className="h-full w-full rounded-full object-cover" />
+                        <img src={chat.avatar_url} alt={shownName} className="h-full w-full rounded-full object-cover" />
                       ) : (
-                        initials(chat.name)
+                        initials(shownName)
                       )}
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between gap-3">
-                        <span className="truncate text-[17px] text-wa-text">{chat.name}</span>
+                        <span className="truncate text-[17px] text-wa-text">{shownName}</span>
                         <span className="text-xs text-wa-text-secondary">{formatTime(chat.timestamp_ms)}</span>
                       </div>
                       <div className="mt-1 flex items-center justify-between gap-3">
@@ -852,6 +878,8 @@ export default function Home() {
                       </div>
                     </div>
                   </button>
+                    );
+                  })()
                 ))
               )
             ) : filteredContacts.length === 0 ? (
@@ -861,6 +889,9 @@ export default function Home() {
               </div>
             ) : (
               filteredContacts.map((contact) => (
+                (() => {
+                  const shownName = displayName(contact.name, contact.jid, contact.phone);
+                  return (
                 <button
                   key={contact.jid}
                   onClick={() => void handleSelectChat(contact.jid)}
@@ -868,14 +899,14 @@ export default function Home() {
                 >
                   <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-full bg-[#dfe5e7] text-sm font-semibold text-wa-text">
                     {contact.avatar_url ? (
-                      <img src={contact.avatar_url} alt={contact.name} className="h-full w-full rounded-full object-cover" />
+                      <img src={contact.avatar_url} alt={shownName} className="h-full w-full rounded-full object-cover" />
                     ) : (
-                      initials(contact.name)
+                      initials(shownName)
                     )}
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <span className="truncate text-[15px] text-wa-text">{contact.name}</span>
+                      <span className="truncate text-[15px] text-wa-text">{shownName}</span>
                       {contact.is_business ? (
                         <span className="rounded-full bg-[#e7fce3] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#057a55]">
                           Business
@@ -887,6 +918,8 @@ export default function Home() {
                     </p>
                   </div>
                 </button>
+                  );
+                })()
               ))
             )}
           </div>
@@ -895,17 +928,20 @@ export default function Home() {
         <main className="flex flex-1 flex-col bg-[#efeae2]">
           {activeChat ? (
             <>
+              {(() => {
+                const shownName = displayName(activeChat.name, activeChat.jid, activeChat.phone);
+                return (
               <header className="flex h-[60px] items-center justify-between border-b border-wa-border bg-[#f0f2f5] px-4">
                 <div className="flex items-center gap-3">
                   <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#dfe5e7] text-sm font-semibold text-wa-text">
                     {activeChat.avatar_url ? (
-                      <img src={activeChat.avatar_url} alt={activeChat.name} className="h-full w-full rounded-full object-cover" />
+                      <img src={activeChat.avatar_url} alt={shownName} className="h-full w-full rounded-full object-cover" />
                     ) : (
-                      initials(activeChat.name)
+                      initials(shownName)
                     )}
                   </div>
                   <div>
-                    <h2 className="text-sm font-medium text-wa-text">{activeChat.name}</h2>
+                    <h2 className="text-sm font-medium text-wa-text">{shownName}</h2>
                     <p className="text-xs text-wa-text-secondary">
                       {formatPresence(activeChat)}
                     </p>
@@ -917,6 +953,8 @@ export default function Home() {
                   </span>
                 ) : null}
               </header>
+                );
+              })()}
 
               <div className="chat-bg flex-1 overflow-y-auto px-6 py-6">
                 {messages.length === 0 ? (

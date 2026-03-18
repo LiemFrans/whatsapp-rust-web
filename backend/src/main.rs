@@ -850,14 +850,6 @@ fn message_timestamp_ms(info: &whatsapp_rust::types::message::MessageInfo) -> i6
 fn jid_phone_str(jid: &str) -> Option<String> {
     if jid.contains("@s.whatsapp.net") {
         Some(jid.split('@').next().unwrap_or_default().to_string())
-    } else if jid.contains("@lid") {
-        let user = jid.split('@').next().unwrap_or_default();
-        let base_user = user.split(':').next().unwrap_or(user);
-        if !base_user.is_empty() && base_user.chars().all(|ch| ch.is_ascii_digit()) {
-            Some(base_user.to_string())
-        } else {
-            None
-        }
     } else {
         None
     }
@@ -883,6 +875,21 @@ fn looks_like_fallback_name(name: &str, jid: &str, phone: Option<&str>) -> bool 
     false
 }
 
+fn display_name_rank(name: &str, jid: &str, phone: Option<&str>) -> u8 {
+    if name.trim().is_empty() {
+        return 0;
+    }
+    if name == jid {
+        return 1;
+    }
+    if let Some(phone) = phone {
+        if name == phone || name == format!("+{phone}") {
+            return 2;
+        }
+    }
+    3
+}
+
 fn is_better_name(candidate: &str, current: &str, jid: &str, phone: Option<&str>) -> bool {
     if candidate.trim().is_empty() {
         return false;
@@ -890,9 +897,7 @@ fn is_better_name(candidate: &str, current: &str, jid: &str, phone: Option<&str>
     if current.trim().is_empty() {
         return true;
     }
-    let candidate_fallback = looks_like_fallback_name(candidate, jid, phone);
-    let current_fallback = looks_like_fallback_name(current, jid, phone);
-    (!candidate_fallback && current_fallback) || (!candidate_fallback && !current_fallback)
+    display_name_rank(candidate, jid, phone) > display_name_rank(current, jid, phone)
 }
 
 fn media_key(chat_jid: &str, message_id: &str) -> String {
@@ -1219,15 +1224,18 @@ async fn ensure_presence_subscription(client: Arc<Client>, jid: Jid) {
     }
 }
 
+async fn resolve_phone_for_jid(client: &Client, jid: &Jid) -> Option<String> {
+    if jid.server == "lid" {
+        client.get_phone_number_from_lid(&jid.to_string()).await
+    } else {
+        jid_phone(jid)
+    }
+}
+
 async fn refresh_contact_profile(state: AppState, client: Arc<Client>, jid: Jid) {
     let lookup_jid = jid.to_non_ad();
     let lookup_jid_str = lookup_jid.to_string();
-    let resolved_lid_phone = if lookup_jid.server == "lid" {
-        client.get_phone_number_from_lid(&lookup_jid_str).await
-    } else {
-        None
-    };
-    let phone = jid_phone(&lookup_jid).or(resolved_lid_phone.clone());
+    let phone = resolve_phone_for_jid(&client, &lookup_jid).await;
     let existing_name = {
         let store = state.store.read().await;
         store
@@ -1388,8 +1396,8 @@ async fn handle_incoming_message(
     let chat_jid = chat.to_string();
     let sender = info.source.sender.to_non_ad();
     let sender_jid = sender.to_string();
-    let phone = jid_phone(&chat);
-    let sender_phone = jid_phone(&sender);
+    let phone = resolve_phone_for_jid(&client, &chat).await;
+    let sender_phone = resolve_phone_for_jid(&client, &sender).await;
     let display_name = if !info.push_name.trim().is_empty() {
         info.push_name.clone()
     } else {
