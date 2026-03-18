@@ -17,6 +17,7 @@
    - [API Endpoints](#api-endpoints)
    - [Event Pipeline](#event-pipeline)
    - [Media Pipeline](#media-pipeline)
+   - [SKDM Warm-up](#skdm-warm-up)
    - [Contact / Group Resolution](#contact--group-resolution)
 5. [Frontend Architecture](#frontend-architecture)
    - [Module Map](#frontend-module-map)
@@ -69,6 +70,7 @@ and renders a WhatsApp Web–style UI.
 | **E2E testing** | Playwright | 1.48+ |
 | **Serialization** | serde / serde_json | 1.x |
 | **Base64** | base64 | 0.22 |
+| **HTTP client** | ureq | 2.x |
 | **CORS** | tower-http | 0.5 |
 
 ---
@@ -80,13 +82,13 @@ whatsapp-rust-web/
 ├── backend/
 │   ├── Cargo.toml
 │   └── src/
-│       ├── main.rs           Entry point, router, tests          (316 lines)
-│       ├── models.rs         Types, DTOs, constants, AppState    (210 lines)
-│       ├── helpers.rs        Pure functions (no async/state)      (467 lines)
-│       ├── store.rs          In-memory DataStore impl            (251 lines)
-│       ├── handlers.rs       11 HTTP handler functions            (453 lines)
-│       ├── sync.rs           Async contact/group resolution       (218 lines)
-│       └── events.rs         WhatsApp event dispatcher            (289 lines)
+│       ├── main.rs           Entry point, router, tests          (~316 lines)
+│       ├── models.rs         Types, DTOs, constants, AppState    (~236 lines)
+│       ├── helpers.rs        Pure functions (no async/state)      (~467 lines)
+│       ├── store.rs          In-memory DataStore impl            (~260 lines)
+│       ├── handlers.rs       13 HTTP handler functions            (~857 lines)
+│       ├── sync.rs           Async contact/group resolution       (~218 lines)
+│       └── events.rs         WhatsApp event dispatcher            (~304 lines)
 │
 ├── frontend/
 │   ├── package.json
@@ -94,20 +96,26 @@ whatsapp-rust-web/
 │   ├── tailwind.config.ts
 │   ├── app/
 │   │   ├── layout.tsx         Root layout
-│   │   ├── page.tsx           Main Home component                 (761 lines)
+│   │   ├── page.tsx           Main Home component                 (~865 lines)
 │   │   ├── lib/
 │   │   │   ├── types.ts       Shared TypeScript interfaces        (69 lines)
 │   │   │   ├── helpers.ts     Pure utility functions               (166 lines)
-│   │   │   └── normalizers.ts Defensive API normalizers            (87 lines)
+│   │   │   ├── normalizers.ts Defensive API normalizers            (87 lines)
+│   │   │   └── emoji-data.ts  Comprehensive emoji dataset          (~1800 lines)
 │   │   └── components/
-│   │       ├── Icons.tsx      6 SVG icon components                (57 lines)
-│   │       └── MessageMedia.tsx  Rich media preview component      (92 lines)
+│   │       ├── Icons.tsx       SVG icon components                 (57 lines)
+│   │       ├── MessageMedia.tsx  Rich media preview component      (92 lines)
+│   │       ├── EmojiPicker.tsx   WhatsApp-style emoji picker       (~350 lines)
+│   │       ├── GifPicker.tsx     Tenor GIF search + send           (~250 lines)
+│   │       ├── StickerPicker.tsx Sticker grid (received stickers)  (~120 lines)
+│   │       └── MediaPicker.tsx   Tabbed container (Emoji/GIF/Sticker) (~80 lines)
 │   ├── tests/
 │   │   └── whatsapp.spec.ts  Playwright E2E tests
 │   └── playwright.config.ts
 │
 ├── run.sh                    One-command startup script
 ├── README.md
+├── ARCHITECTURE.md           Detailed architecture documentation
 └── LICENSE
 ```
 
@@ -149,17 +157,22 @@ handlers and event callbacks:
 
 ```rust
 pub struct AppState {
-    pub qr_code:      Arc<RwLock<Option<String>>>,   // Current QR code for pairing
-    pub is_connected:  Arc<AtomicBool>,               // WhatsApp connection status
-    pub is_syncing:    Arc<AtomicBool>,               // Startup sync in progress
-    pub client:        Arc<RwLock<Option<Arc<Client>>>>, // WhatsApp protocol client
-    pub store:         Arc<RwLock<DataStore>>,         // In-memory chat/contact/media store
-    pub db_path:       Arc<String>,                    // SQLite database path
+    pub qr_code:       Arc<RwLock<Option<String>>>,       // Current QR code for pairing
+    pub is_connected:  Arc<AtomicBool>,                   // WhatsApp connection status
+    pub is_syncing:    Arc<AtomicBool>,                   // Startup sync in progress
+    pub client:        Arc<RwLock<Option<Arc<Client>>>>,  // WhatsApp protocol client
+    pub store:         Arc<RwLock<DataStore>>,             // In-memory chat/contact/media store
+    pub db_path:       Arc<String>,                       // SQLite database path
+    pub warmed_groups: Arc<RwLock<HashSet<String>>>,      // Groups that have received SKDM
 }
 ```
 
 All fields are `Arc`-wrapped for cheap cloning. Mutable state uses `RwLock` (from Tokio) or
 `AtomicBool` for lock-free flags. `AppState` implements `Clone`.
+
+The `warmed_groups` set tracks which group JIDs have already exchanged Sender Key Distribution
+Messages (SKDM) in the current session, preventing retry storms when sending media to groups
+for the first time (see [SKDM Warm-up](#skdm-warm-up)).
 
 ### Data Models
 
@@ -175,6 +188,8 @@ All fields are `Arc`-wrapped for cheap cloning. Mutable state uses `RwLock` (fro
 | `MediaAttachment` | Serializable media metadata sent to the frontend (kind, MIME, dimensions, download path, preview) |
 | `MediaBlob` | Server-side download parameters (direct path, media key, SHA256 hashes, file length, media type) — never serialized to the client |
 | `MentionSummary` | Resolved mention: JID + display name |
+| `StickerRecord` | Received sticker entry: URL, MIME type, dimensions (for sticker picker) |
+| `StickersResponse` | DTO wrapping `Vec<StickerRecord>` for the `/api/stickers` endpoint |
 
 **Constants:**
 
@@ -194,6 +209,7 @@ All fields are `Arc`-wrapped for cheap cloning. Mutable state uses `RwLock` (fro
 | `ChatsResponse` | → client | Sorted chat summaries |
 | `ContactsResponse` | → client | Sorted contact list |
 | `SendMessageRequest` | ← client | phone/jid, message text, mention JIDs |
+| `SendMediaRequest` | ← client | phone/jid, url, media_type (`sticker`/`gif`/`image`), caption, width, height |
 | `TypingRequest` | ← client | Typing state string (`composing` / `recording` / `paused`) |
 | `SendMessageResponse` | → client | Success flag + message ID |
 | `LogoutResponse` | → client | Success flag + message |
@@ -215,7 +231,9 @@ All endpoints are prefixed with `/api` and proxied from the frontend via Next.js
 | `POST` | `/api/chats/:jid/read` | `mark_chat_read` | Locally zeroes unread count | — |
 | `POST` | `/api/chats/:jid/typing` | `update_typing` | Forwards typing state to WhatsApp | ✅ `client.chatstate()` |
 | `POST` | `/api/messages/send` | `send_message` | Sends a text message (with optional mentions) | ✅ `client.send_message()` |
+| `POST` | `/api/messages/send-media` | `send_media` | Sends media (sticker/GIF/image) by URL | ✅ `client.upload()` + `send_message()` |
 | `GET` | `/api/media/:chat_jid/:message_id` | `get_media` | Downloads + proxies media from WhatsApp servers | ✅ `client.download_from_params()` |
+| `GET` | `/api/stickers` | `get_stickers` | Returns recently received stickers from the store | — |
 
 #### Send Message Flow
 
@@ -235,9 +253,10 @@ bot's `on_event` closure in `main()`. It matches on ~20 `Event` variants:
 
 ```
 Event::PairingQrCode     → stores QR code, sets is_connected=false
-Event::Connected          → sets is_connected=true, spawns startup sync
-Event::Disconnected       → sets is_connected=false
+Event::Connected          → sets is_connected=true, clears warmed_groups, spawns startup sync
+Event::Disconnected       → sets is_connected=false, clears warmed_groups
 Event::Message            → handle_incoming_message() [see below]
+                             (also marks sender group as warmed in warmed_groups)
 Event::Receipt            → promotes receipt status (sent→delivered→read→played)
 Event::ChatPresence       → updates typing indicator per chat
 Event::Presence           → updates online/last-seen per contact
@@ -265,7 +284,8 @@ Event::OfflineSyncCompleted → clears is_syncing flag
 6. Extracts media attachment + blob if present.
 7. Upserts contact record.
 8. Records message in the store (with media blob for later download).
-9. Spawns background tasks for profile refresh and presence subscription.
+9. If the message contains a sticker, records it in the sticker store for re-sending.
+10. Spawns background tasks for profile refresh and presence subscription.
 
 ### Media Pipeline
 
@@ -284,6 +304,59 @@ Media is handled in a two-phase flow:
 **Document preview images**: For documents, the WhatsApp proto may include a JPEG thumbnail.
 This is base64-encoded into a `data:image/jpeg;base64,...` URL and stored in
 `MediaAttachment.preview_image_url` for inline rendering.
+
+#### Outbound Media Sending (`send_media` handler)
+
+The `POST /api/messages/send-media` endpoint handles sending media (stickers, GIFs, images) to
+any chat. The flow:
+
+1. **Validate** request fields (`url`, `media_type`, target JID/phone).
+2. **SKDM pre-warm** (groups only): If the target group is not in `warmed_groups`, sends a
+   zero-width space text message first and waits 4 seconds for SKDM key exchange to complete
+   (see [SKDM Warm-up](#skdm-warm-up)).
+3. **Fetch** the media bytes from the URL via `ureq` (wrapped in `tokio::task::spawn_blocking()`
+   to avoid blocking the Tokio runtime).
+4. **Upload** the media to WhatsApp servers using `client.upload(media_bytes, media_type)`.
+5. **Build** the appropriate proto message:
+   - **Sticker** → `StickerMessage` with `url`, `file_sha256`, `file_enc_sha256`, `file_length`,
+     `media_key`, `direct_path`, `mimetype` (`image/webp`).
+   - **GIF** → `VideoMessage` with `gif_playback: true`, `gif_attribution: Some(2)` (Tenor),
+     `mimetype` (`video/mp4`), plus optional `width`/`height`.
+   - **Image** → `ImageMessage` with `url`, crypto params, `mimetype`, optional `caption`.
+6. **Send** via `client.send_message()` and mark the group as warmed.
+
+### SKDM Warm-up
+
+WhatsApp uses the **Sender Key Distribution Message (SKDM)** protocol for group encryption.
+When a client sends a message to a group for the first time in a session, it must distribute
+its sender key to all group participants. If this handshake hasn't completed before media is
+sent, the server may reject the message, causing retry storms that can lead to temporary bans.
+
+The warm-up system prevents this:
+
+```
+First media send to group X
+    │
+    ├── Is group X in warmed_groups?  ──YES──→ Send media directly
+    │
+    NO
+    │
+    ▼
+Send zero-width space (\u200B) text message
+    │
+    ▼
+Wait 4 seconds (SKDM key exchange completes)
+    │
+    ▼
+Send actual media message
+    │
+    ▼
+Add group X to warmed_groups
+```
+
+Groups are also passively warmed by incoming messages: when any message arrives from a group,
+that group is added to `warmed_groups`. The set is cleared on disconnect/reconnect since
+sender keys may have changed.
 
 ### Contact / Group Resolution
 
@@ -313,10 +386,15 @@ app/
 ├── lib/
 │   ├── types.ts            Shared interfaces (ApiMessage, ApiChat, ApiContact, BootstrapResponse)
 │   ├── helpers.ts          ~30 pure utility functions
-│   └── normalizers.ts      Defensive normalizers for API responses
+│   ├── normalizers.ts      Defensive normalizers for API responses
+│   └── emoji-data.ts       Comprehensive emoji dataset (8 categories, ~1800 entries)
 └── components/
     ├── Icons.tsx            6 SVG icon components
-    └── MessageMedia.tsx     Rich media preview component
+    ├── MessageMedia.tsx     Rich media preview component
+    ├── EmojiPicker.tsx      WhatsApp-style emoji picker (search, categories, skin tones)
+    ├── GifPicker.tsx        Tenor API v2 GIF search with category tiles
+    ├── StickerPicker.tsx    Grid of stickers collected from received messages
+    └── MediaPicker.tsx      Tabbed container switching between Emoji/GIF/Sticker pickers
 ```
 
 **Import dependency graph:**
@@ -325,9 +403,14 @@ app/
 types.ts          ← (standalone)
 helpers.ts        ← types
 normalizers.ts    ← types, helpers
+emoji-data.ts     ← (standalone)
 Icons.tsx         ← (standalone)
 MessageMedia.tsx  ← types, helpers
-page.tsx          ← types, helpers, normalizers, Icons, MessageMedia
+EmojiPicker.tsx   ← emoji-data
+GifPicker.tsx     ← (standalone, uses Tenor API)
+StickerPicker.tsx ← (standalone, fetches /api/stickers)
+MediaPicker.tsx   ← EmojiPicker, GifPicker, StickerPicker
+page.tsx          ← types, helpers, normalizers, Icons, MessageMedia, MediaPicker
 ```
 
 ### Component Tree
@@ -354,6 +437,11 @@ page.tsx          ← types, helpers, normalizers, Icons, MessageMedia
 │   │   │   └── Receipt Icon    (✓ / ✓✓ / colored ✓✓)
 │   │   └── ...
 │   └── Message Input
+│       ├── <MediaPicker>       (toggle via smiley icon)
+│       │   ├── Tab Bar         (Emoji / GIF / Sticker)
+│       │   ├── <EmojiPicker>   (search, 8 categories, skin tone selector)
+│       │   ├── <GifPicker>     (Tenor search, category tiles, preview grid)
+│       │   └── <StickerPicker> (received stickers grid)
 │       ├── Mention Dropdown    (@ autocomplete)
 │       └── Send Button
 └── Empty State                 (when no chat selected)
@@ -378,6 +466,7 @@ The `Home` component manages all state via React hooks:
 | `newChatPhone` | `useState<string>` | Phone number for new chat dialog |
 | `showNewChat` | `useState<boolean>` | New chat dialog open |
 | `mentionQuery` | `useState<string \| null>` | Active @mention autocomplete query |
+| `showMediaPicker` | `useState<boolean>` | Media picker panel open/closed |
 
 Key `useMemo` computations:
 - **filteredChats**: Chats filtered by search query and sorted by timestamp.
@@ -462,6 +551,28 @@ handlers::send_message()
     │
     ▼
 Frontend updates on next poll cycle (3s)
+```
+
+### Outgoing Media (Sticker / GIF / Image)
+
+```
+User selects GIF/sticker/image in MediaPicker
+    │
+    ▼
+Frontend: POST /api/messages/send-media { jid, phone, url, media_type, caption, width, height }
+    │
+    ▼
+handlers::send_media()
+    ├── Resolve target JID (phone/JID/LID)
+    ├── SKDM pre-warm if group not in warmed_groups
+    │     ├── send zero-width space text
+    │     └── wait 4 seconds
+    ├── Fetch media bytes from URL (ureq, via spawn_blocking)
+    ├── client.upload(bytes, media_type)     ← upload to WA servers
+    ├── Build StickerMessage / VideoMessage / ImageMessage proto
+    ├── client.send_message()                ← send to recipient
+    ├── Mark group as warmed
+    └── Return { success, message_id }
 ```
 
 ### Media Download
@@ -569,4 +680,4 @@ Tests are located in `frontend/tests/whatsapp.spec.ts` and use Playwright with C
 
 ---
 
-*Last updated: March 2026*
+*Last updated: March 2025*
