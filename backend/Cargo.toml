@@ -4,8 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tower-http = { version = "0.6", features = ["cors"] }
+futures = "0.3"
+log = "0.4"
+env_logger = "0.11"
 whatsapp_rust = { package = "whatsapp-rust", git = "https://github.com/jlucaso1/whatsapp-rust", features = ["sqlite-storage"] }
 whatsapp_rust_tokio_transport = { package = "whatsapp-rust-tokio-transport", git = "https://github.com/jlucaso1/whatsapp-rust" }
 whatsapp_rust_ureq_http_client = { package = "whatsapp-rust-ureq-http-client", git = "https://github.com/jlucaso1/whatsapp-rust" }

@@ -1,11 +1,76 @@
+/// <reference types="node" />
 import { test, expect } from "@playwright/test";
 
-test.describe("Helpdesk Dashboard", () => {
-  test.beforeEach(async ({ page }) => {
+// Clear localStorage before each test so persisted data doesn't leak between tests
+test.beforeEach(async ({ page }) => {
+  // Navigate first so we have a page context, then clear storage
+  await page.goto("/");
+  await page.evaluate(() => localStorage.clear());
+});
+
+/* ================================================================
+   Routing
+   ================================================================ */
+test.describe("Routing", () => {
+  test("default route loads the Inbox view", async ({ page }) => {
     await page.goto("/");
+    await expect(page.locator(".ticket-panel")).toBeVisible();
+    await expect(page.locator(".conversation")).toBeVisible();
   });
 
-  /* ── Layout ─────────────────────────────────────── */
+  test("navigating to Dashboard shows analytics page", async ({ page }) => {
+    await page.goto("/");
+    await page.locator(".sidebar-btn", { hasText: "Dashboard" }).click();
+    await expect(page.getByTestId("dashboard-page")).toBeVisible();
+    await expect(page.locator(".ticket-panel")).not.toBeVisible();
+  });
+
+  test("navigating to Broadcasts shows broadcasts page", async ({ page }) => {
+    await page.goto("/");
+    await page.locator(".sidebar-btn", { hasText: "Broadcasts" }).click();
+    await expect(page.getByTestId("broadcasts-page")).toBeVisible();
+  });
+
+  test("navigating to Settings shows settings page", async ({ page }) => {
+    await page.goto("/");
+    await page.locator(".sidebar-btn", { hasText: "Settings" }).click();
+    await expect(page.getByTestId("settings-page")).toBeVisible();
+  });
+
+  test("can navigate from Dashboard back to Inbox", async ({ page }) => {
+    await page.goto("/");
+    await page.locator(".sidebar-btn", { hasText: "Dashboard" }).click();
+    await expect(page.getByTestId("dashboard-page")).toBeVisible();
+    await page.locator(".sidebar-btn", { hasText: "Inbox" }).click();
+    await expect(page.locator(".ticket-panel")).toBeVisible();
+  });
+
+  test("active sidebar button gets highlighted on route change", async ({ page }) => {
+    await page.goto("/");
+    const inboxBtn = page.locator(".sidebar-btn", { hasText: "Inbox" });
+    await expect(inboxBtn).toHaveClass(/active/);
+    await page.locator(".sidebar-btn", { hasText: "Settings" }).click();
+    const settingsBtn = page.locator(".sidebar-btn", { hasText: "Settings" });
+    await expect(settingsBtn).toHaveClass(/active/);
+    await expect(inboxBtn).not.toHaveClass(/active/);
+  });
+
+  test("direct URL navigation works for /dashboard", async ({ page }) => {
+    await page.goto("/dashboard");
+    await expect(page.getByTestId("dashboard-page")).toBeVisible();
+    await expect(page.locator(".sidebar-btn", { hasText: "Dashboard" })).toHaveClass(/active/);
+  });
+});
+
+/* ================================================================
+   Inbox — Empty State
+   ================================================================ */
+test.describe("Inbox — Empty State", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto("/");
+    await page.evaluate(() => localStorage.clear());
+    await page.goto("/");
+  });
 
   test("renders the three-column layout", async ({ page }) => {
     await expect(page.locator(".sidebar")).toBeVisible();
@@ -13,224 +78,263 @@ test.describe("Helpdesk Dashboard", () => {
     await expect(page.locator(".conversation")).toBeVisible();
   });
 
-  /* ── Sidebar ────────────────────────────────────── */
-
   test("sidebar shows logo and nav buttons", async ({ page }) => {
     await expect(page.locator(".sidebar-logo")).toHaveText("HD");
-    const navButtons = page.locator(".sidebar-btn");
-    await expect(navButtons).toHaveCount(4);
-    await expect(navButtons.nth(0)).toContainText("Dashboard");
-    await expect(navButtons.nth(1)).toContainText("Inbox");
-    await expect(navButtons.nth(2)).toContainText("Broadcasts");
-    await expect(navButtons.nth(3)).toContainText("Settings");
+    await expect(page.locator(".sidebar-btn")).toHaveCount(4);
   });
 
-  test("sidebar nav highlights active button on click", async ({ page }) => {
-    const dashBtn = page.locator(".sidebar-btn", { hasText: "Dashboard" });
-    await dashBtn.click();
-    await expect(dashBtn).toHaveClass(/active/);
-    // Inbox should no longer be active
-    const inboxBtn = page.locator(".sidebar-btn", { hasText: "Inbox" });
-    await expect(inboxBtn).not.toHaveClass(/active/);
-  });
-
-  /* ── Ticket panel ───────────────────────────────── */
-
-  test("shows 'Conversations' heading and search input", async ({ page }) => {
+  test("shows Conversations heading and search input", async ({ page }) => {
     await expect(page.locator(".ticket-header h2")).toHaveText("Conversations");
-    await expect(page.locator(".ticket-search input")).toBeVisible();
-    await expect(page.locator(".ticket-search input")).toHaveAttribute(
-      "placeholder",
-      "Search conversations…"
-    );
+    await expect(page.locator(".ticket-search input")).toHaveAttribute("placeholder", "Search conversations…");
   });
 
-  test("shows All / Open / Resolved tabs with counts", async ({ page }) => {
+  test("shows All / Open / Resolved tabs with zero counts", async ({ page }) => {
     const tabs = page.locator(".ticket-tab");
     await expect(tabs).toHaveCount(3);
-    await expect(tabs.nth(0)).toContainText("All");
-    await expect(tabs.nth(1)).toContainText("Open");
-    await expect(tabs.nth(2)).toContainText("Resolved");
-    // All tab should show total ticket count
-    await expect(tabs.nth(0).locator(".count")).toHaveText("8");
+    await expect(tabs.nth(0).locator(".count")).toHaveText("0");
+    await expect(tabs.nth(1).locator(".count")).toHaveText("0");
+    await expect(tabs.nth(2).locator(".count")).toHaveText("0");
   });
 
-  test("All tab is active by default", async ({ page }) => {
-    const allTab = page.locator(".ticket-tab").nth(0);
-    await expect(allTab).toHaveClass(/active/);
+  test("ticket list shows empty state message", async ({ page }) => {
+    await expect(page.getByTestId("ticket-list-empty")).toBeVisible();
+    await expect(page.getByTestId("ticket-list-empty")).toContainText("No conversations yet");
   });
 
-  test("renders all 8 tickets in the list by default", async ({ page }) => {
-    const items = page.locator(".ticket-item");
-    await expect(items).toHaveCount(8);
+  test("no tickets are rendered", async ({ page }) => {
+    await expect(page.locator(".ticket-item")).toHaveCount(0);
   });
 
-  test("first ticket is selected by default", async ({ page }) => {
-    const firstItem = page.locator(".ticket-item").first();
-    await expect(firstItem).toHaveClass(/active/);
-    await expect(firstItem.locator(".ticket-name")).toHaveText("Emma Thompson");
+  test("inbox empty state is shown when no ticket is selected", async ({ page }) => {
+    await expect(page.getByTestId("inbox-empty")).toBeVisible();
+    await expect(page.getByTestId("inbox-empty")).toContainText("No conversations yet");
+    await expect(page.getByTestId("inbox-empty")).toContainText("Incoming WhatsApp messages");
   });
 
-  test("ticket items display name, preview, time, and status badge", async ({
-    page,
-  }) => {
-    const firstItem = page.locator(".ticket-item").first();
-    await expect(firstItem.locator(".ticket-name")).toBeVisible();
-    await expect(firstItem.locator(".ticket-preview")).toBeVisible();
-    await expect(firstItem.locator(".ticket-time")).toBeVisible();
-    await expect(firstItem.locator(".badge").first()).toBeVisible();
+  test("sidebar avatar opens My Profile modal", async ({ page }) => {
+    await page.locator(".sidebar-avatar").click();
+    await expect(page.locator(".modal-header h3")).toHaveText("My Profile");
+    await expect(page.locator(".modal-profile-name")).toHaveText("Frans D.");
+  });
+});
+
+/* ================================================================
+   Dashboard — Analytics
+   ================================================================ */
+test.describe("Dashboard — Analytics", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto("/dashboard");
   });
 
-  test("priority badge is shown on priority tickets", async ({ page }) => {
-    const firstItem = page.locator(".ticket-item").first();
-    await expect(firstItem.locator(".badge-priority")).toHaveText("priority");
+  test("shows dashboard page with header", async ({ page }) => {
+    await expect(page.getByTestId("dashboard-page")).toBeVisible();
+    await expect(page.locator(".dashboard-header h2")).toHaveText("Dashboard");
   });
 
-  /* ── Tab filtering ──────────────────────────────── */
+  test("renders four stat cards", async ({ page }) => {
+    await expect(page.getByTestId("stat-cards")).toBeVisible();
+    await expect(page.locator(".stat-card")).toHaveCount(4);
+  });
 
-  test("Open tab filters to open tickets only", async ({ page }) => {
-    await page.locator(".ticket-tab", { hasText: "Open" }).click();
-    const items = page.locator(".ticket-item");
-    // All visible items should have an 'open' badge
-    const count = await items.count();
-    expect(count).toBeGreaterThan(0);
-    for (let i = 0; i < count; i++) {
-      await expect(items.nth(i).locator(".badge-open")).toBeVisible();
+  test("connection status card shows a valid state", async ({ page }) => {
+    const val = page.getByTestId("stat-connection-value");
+    const text = await val.textContent();
+    expect(["Disconnected", "Scanning QR…", "Connected"]).toContain(text?.trim());
+  });
+
+  test("total messages card shows 0 initially", async ({ page }) => {
+    await expect(page.getByTestId("stat-messages-value")).toHaveText("0");
+  });
+
+  test("active conversations card shows 0 initially", async ({ page }) => {
+    await expect(page.getByTestId("stat-conversations-value")).toHaveText("0");
+  });
+
+  test("uptime card shows 99.9%", async ({ page }) => {
+    await expect(page.getByTestId("stat-uptime-value")).toHaveText("99.9%");
+  });
+
+  test("recent activity table is visible", async ({ page }) => {
+    await expect(page.getByTestId("activity-table")).toBeVisible();
+  });
+
+  test("activity table shows empty state when no messages", async ({ page }) => {
+    await expect(page.getByTestId("activity-empty")).toBeVisible();
+    await expect(page.getByTestId("activity-empty")).toContainText("No messages yet");
+  });
+});
+
+/* ================================================================
+   Settings — WhatsApp QR Connection
+   ================================================================ */
+test.describe("Settings — QR Connection", () => {
+  /**
+   * Helper: wait until the Settings page connection state has stabilised.
+   * The component always renders "Not connected" on mount, then the
+   * useWhatsApp hook may sync to "connected" via REST / WS within a few
+   * hundred ms.  We poll for up to 2 s — once the status text stops
+   * changing for 300 ms we consider it settled and return the final value.
+   */
+  async function waitForSettledState(page: import("@playwright/test").Page) {
+    await page.goto("/settings");
+    await expect(page.getByTestId("settings-page")).toBeVisible();
+
+    let lastText = "";
+    let stableCount = 0;
+    for (let i = 0; i < 20; i++) {
+      const text =
+        (await page.getByTestId("connection-status").textContent()) ?? "";
+      if (text === lastText) {
+        stableCount++;
+        if (stableCount >= 3) break; // stable for 300ms
+      } else {
+        lastText = text;
+        stableCount = 0;
+      }
+      await page.waitForTimeout(100);
     }
+    return lastText;
+  }
+
+  test("shows settings page with connection card", async ({ page }) => {
+    await waitForSettledState(page);
+    await expect(page.getByTestId("settings-page")).toBeVisible();
+    await expect(page.getByTestId("connection-card")).toBeVisible();
   });
 
-  test("Resolved tab filters to resolved tickets only", async ({ page }) => {
-    await page.locator(".ticket-tab", { hasText: "Resolved" }).click();
-    const items = page.locator(".ticket-item");
-    const count = await items.count();
-    expect(count).toBeGreaterThan(0);
-    for (let i = 0; i < count; i++) {
-      await expect(items.nth(i).locator(".badge-resolved")).toBeVisible();
+  test("connection card shows a valid state", async ({ page }) => {
+    const settled = await waitForSettledState(page);
+    expect(["Not connected", "Waiting for scan…", "Connected"]).toContain(
+      settled
+    );
+  });
+
+  test("clicking Show QR Code enters scanning state (when disconnected)", async ({
+    page,
+  }) => {
+    const settled = await waitForSettledState(page);
+    if (settled !== "Not connected") {
+      test.skip();
+      return;
     }
+    await page.getByTestId("connect-btn").click();
+    await expect(page.getByTestId("connection-status")).toHaveText(
+      "Waiting for scan…"
+    );
+    await expect(page.getByTestId("qr-scanning")).toBeVisible();
+    await expect(page.locator(".qr-code-wrapper svg")).toBeVisible();
+    await expect(page.getByTestId("simulate-btn")).toBeVisible();
   });
 
-  test("switching back to All tab shows all tickets", async ({ page }) => {
-    await page.locator(".ticket-tab", { hasText: "Open" }).click();
-    await page.locator(".ticket-tab", { hasText: "All" }).click();
-    await expect(page.locator(".ticket-item")).toHaveCount(8);
-  });
-
-  /* ── Ticket selection & conversation ────────────── */
-
-  test("clicking a ticket updates the conversation header", async ({
+  test("clicking Simulate Connection enters connected state", async ({
     page,
   }) => {
-    // Click the third ticket (Sarah Chen)
-    await page.locator(".ticket-item").nth(2).click();
-    await expect(page.locator(".conv-header-info h3")).toHaveText("Sarah Chen");
-    await expect(page.locator(".conv-header-info span")).toContainText(
-      "WhatsApp"
+    const settled = await waitForSettledState(page);
+    if (settled !== "Not connected") {
+      // Already connected — verify connected state directly
+      await expect(page.getByTestId("connection-status")).toHaveText(
+        "Connected"
+      );
+      return;
+    }
+    await page.getByTestId("connect-btn").click();
+    await page.getByTestId("simulate-btn").click();
+    await expect(page.getByTestId("connection-status")).toHaveText("Connected");
+    await expect(page.getByTestId("qr-connected")).toBeVisible();
+    await expect(page.getByTestId("qr-connected")).toContainText(
+      "WhatsApp Device"
+    );
+    await expect(page.getByTestId("disconnect-btn")).toBeVisible();
+    await expect(page.locator(".toast-msg")).toContainText(
+      "connected successfully"
     );
   });
 
-  test("clicking a ticket loads its messages", async ({ page }) => {
-    // Default selection (Emma Thompson) should have 5 messages
-    const messages = page.locator(".msg");
-    await expect(messages).toHaveCount(5);
-  });
-
-  test("clicking a different ticket changes the messages", async ({
-    page,
-  }) => {
-    // Click Sarah Chen (ticket index 2, id 3) — has 3 messages
-    await page.locator(".ticket-item").nth(2).click();
-    await expect(page.locator(".msg")).toHaveCount(3);
-  });
-
-  test("selected ticket gets active styling", async ({ page }) => {
-    const thirdItem = page.locator(".ticket-item").nth(2);
-    await thirdItem.click();
-    await expect(thirdItem).toHaveClass(/active/);
-    // First item should no longer be active
-    await expect(page.locator(".ticket-item").first()).not.toHaveClass(
-      /active/
+  test("disconnecting returns to initial state", async ({ page }) => {
+    const settled = await waitForSettledState(page);
+    if (settled !== "Not connected") {
+      // Already connected — just disconnect
+      await page.getByTestId("disconnect-btn").click();
+      await expect(page.getByTestId("connection-status")).toHaveText(
+        "Not connected"
+      );
+      await expect(page.locator(".toast-msg")).toContainText("disconnected");
+      return;
+    }
+    await page.getByTestId("connect-btn").click();
+    await page.getByTestId("simulate-btn").click();
+    await expect(page.locator(".toast-msg")).toContainText(
+      "connected successfully"
     );
-  });
-
-  /* ── Conversation pane ──────────────────────────── */
-
-  test("conversation header shows contact info and action buttons", async ({
-    page,
-  }) => {
-    await expect(page.locator(".conv-header-avatar")).toBeVisible();
-    await expect(page.locator(".conv-header-info h3")).toHaveText(
-      "Emma Thompson"
+    await page.locator(".toast-close").click();
+    await page.getByTestId("disconnect-btn").click();
+    await expect(page.getByTestId("connection-status")).toHaveText(
+      "Not connected"
     );
-    // Action buttons
-    await expect(
-      page.locator(".conv-action-btn", { hasText: "Assign" })
-    ).toBeVisible();
-    await expect(
-      page.locator(".conv-action-btn", { hasText: "Resolve" })
-    ).toBeVisible();
+    await expect(page.getByTestId("connect-btn")).toBeVisible();
+    await expect(page.locator(".toast-msg")).toContainText("disconnected");
   });
 
-  test("messages show sender name, bubble, and timestamp", async ({
-    page,
-  }) => {
-    const firstMsg = page.locator(".msg").first();
-    await expect(firstMsg.locator(".msg-sender")).toBeVisible();
-    await expect(firstMsg.locator(".msg-bubble")).toBeVisible();
-    await expect(firstMsg.locator(".msg-time")).toBeVisible();
+  test("QR timer countdown is visible during scanning", async ({ page }) => {
+    const settled = await waitForSettledState(page);
+    if (settled !== "Not connected") {
+      test.skip();
+      return;
+    }
+    await page.getByTestId("connect-btn").click();
+    await expect(page.locator(".qr-timer")).toBeVisible();
+    await expect(page.locator(".qr-timer")).toContainText("QR refreshes in");
+  });
+});
+
+/* ================================================================
+   Broadcasts Page
+   ================================================================ */
+test.describe("Broadcasts Page", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto("/broadcasts");
   });
 
-  test("incoming messages have correct styling", async ({ page }) => {
-    const incoming = page.locator(".msg.incoming").first();
-    await expect(incoming).toBeVisible();
-    await expect(incoming.locator(".msg-sender")).toHaveText("Emma Thompson");
+  test("shows compose card and campaigns table", async ({ page }) => {
+    await expect(page.getByTestId("compose-card")).toBeVisible();
+    await expect(page.getByTestId("campaigns-table")).toBeVisible();
   });
 
-  test("outgoing messages have correct styling", async ({ page }) => {
-    const outgoing = page.locator(".msg.outgoing").first();
-    await expect(outgoing).toBeVisible();
-    await expect(outgoing.locator(".msg-sender")).toHaveText("You");
+  test("campaigns table starts empty", async ({ page }) => {
+    const rows = page.locator(".campaigns-table tbody tr");
+    await expect(rows).toHaveCount(0);
   });
 
-  test("Today divider is shown above messages", async ({ page }) => {
-    await expect(page.locator(".msg-divider")).toHaveText("Today");
+  test("sending a campaign without message shows validation toast", async ({ page }) => {
+    await page.getByTestId("send-campaign-btn").click();
+    await expect(page.locator(".toast-msg")).toHaveText("Please enter a message body");
   });
 
-  /* ── Composer ───────────────────────────────────── */
-
-  test("composer has toolbar, textarea, and send button", async ({ page }) => {
-    await expect(page.locator(".composer-toolbar")).toBeVisible();
-    await expect(page.locator(".composer-textarea")).toBeVisible();
-    await expect(page.locator(".composer-send")).toBeVisible();
+  test("sending a campaign without phone numbers shows validation toast", async ({ page }) => {
+    await page.getByTestId("broadcast-message").fill("Hello world!");
+    await page.getByTestId("send-campaign-btn").click();
+    await expect(page.locator(".toast-msg")).toHaveText("Please enter at least one phone number");
   });
 
-  test("composer toolbar has formatting buttons", async ({ page }) => {
-    const tools = page.locator(".composer-tool");
-    await expect(tools).toHaveCount(3);
+  test("sending a valid campaign adds a row to the table", async ({ page }) => {
+    await page.getByTestId("broadcast-message").fill("Test broadcast message");
+    await page.getByTestId("broadcast-phones").fill("+62 812-0001\n+62 812-0002\n+62 812-0003");
+    await page.getByTestId("send-campaign-btn").click();
+    // Table should now have 1 row
+    await expect(page.locator(".campaigns-table tbody tr")).toHaveCount(1);
+    // Toast should mention 3 recipients
+    await expect(page.locator(".toast-msg")).toContainText("3 recipients");
+    // Form should be cleared
+    await expect(page.getByTestId("broadcast-message")).toHaveValue("");
+    await expect(page.getByTestId("broadcast-phones")).toHaveValue("");
   });
 
-  test("composer textarea has correct placeholder", async ({ page }) => {
-    await expect(page.locator(".composer-textarea")).toHaveAttribute(
-      "placeholder",
-      "Type your reply…"
-    );
-  });
-
-  test("composer textarea accepts input", async ({ page }) => {
-    const textarea = page.locator(".composer-textarea");
-    await textarea.fill("Hello, how can I help?");
-    await expect(textarea).toHaveValue("Hello, how can I help?");
-  });
-
-  /* ── Ticket with default messages ───────────────── */
-
-  test("tickets without specific conversation show default messages", async ({
-    page,
-  }) => {
-    // James Rodriguez (index 1, id 2) has no custom messages → defaults
-    await page.locator(".ticket-item").nth(1).click();
-    await expect(page.locator(".conv-header-info h3")).toHaveText(
-      "James Rodriguez"
-    );
-    await expect(page.locator(".msg")).toHaveCount(2);
+  test("new campaign appears at the top of the table with 'queued' badge", async ({ page }) => {
+    await page.getByTestId("broadcast-message").fill("New campaign");
+    await page.getByTestId("broadcast-phones").fill("+1 555-0001");
+    await page.getByTestId("send-campaign-btn").click();
+    const firstRow = page.locator(".campaigns-table tbody tr").first();
+    await expect(firstRow.locator(".campaign-badge")).toHaveText("queued");
+    await expect(firstRow.locator(".td-message")).toContainText("New campaign");
   });
 });
