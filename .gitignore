@@ -25,14 +25,11 @@ backend/*.db
 backend/*.db-shm
 backend/*.db-wal
 
-# --- Frontend (Node / Vite) ---
+# --- Frontend (Node / Next.js) ---
 frontend/node_modules/
-frontend/dist/
-frontend/dist-ssr/
+frontend/.next/
+frontend/out/
 frontend/*.local
-
-# Vite dev server cache
-frontend/.vite/
 
 # Cargo/local cache
 .cargo/
