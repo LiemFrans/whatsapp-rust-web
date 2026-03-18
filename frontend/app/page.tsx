@@ -308,6 +308,21 @@ function getReceiptColor(status: string | null) {
   return "text-wa-text-secondary";
 }
 
+function mentionTokenFromJid(jid: string) {
+  return jid.split("@")[0]?.split(":")[0] ?? jid;
+}
+
+function mentionLabel(name: string) {
+  return `@${name.replace(/^\+/, "")}`;
+}
+
+function shouldRenderMessageText(message: ApiMessage) {
+  const text = (message.text || message.media?.caption || "").trim();
+  if (!text) return false;
+  if (text === "Sticker" || text === "<non-text>") return false;
+  return true;
+}
+
 function renderTextWithMentions(message: ApiMessage) {
   const text = message.text || message.media?.caption || "";
   const mentions = Array.isArray(message.mentions) ? message.mentions : [];
@@ -315,10 +330,12 @@ function renderTextWithMentions(message: ApiMessage) {
 
   let output = text;
   for (const mention of mentions) {
+    const mentionToken = mentionTokenFromJid(mention.jid);
+    const label = mentionLabel(mention.name);
+    output = output.replaceAll(`@${mentionToken}`, label);
+
     const phone = phoneFromJid(mention.jid);
-    if (phone) {
-      output = output.replaceAll(`@${phone}`, `@${mention.name}`);
-    }
+    if (phone) output = output.replaceAll(`@${phone}`, label);
   }
   return output;
 }
@@ -985,19 +1002,7 @@ export default function Home() {
                           </p>
                         ) : null}
                         <MessageMedia message={message} />
-                        {Array.isArray(message.mentions) && message.mentions.length ? (
-                          <div className="mb-2 flex flex-wrap gap-1">
-                            {message.mentions.map((mention) => (
-                              <span
-                                key={`${message.id}-${mention.jid}`}
-                                className="rounded-full bg-wa-teal/10 px-2 py-0.5 text-[11px] font-medium text-wa-teal-dark"
-                              >
-                                @{mention.name}
-                              </span>
-                            ))}
-                          </div>
-                        ) : null}
-                        {message.text || message.media?.caption ? (
+                        {shouldRenderMessageText(message) ? (
                           <p className="whitespace-pre-wrap text-sm text-wa-text">{renderTextWithMentions(message)}</p>
                         ) : null}
                         <div className="mt-1 flex items-center justify-end gap-1 text-right text-[11px] text-wa-text-secondary">

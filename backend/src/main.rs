@@ -378,6 +378,24 @@ impl DataStore {
             }
         }
     }
+
+    fn refresh_mention_names(&mut self, alias_jids: &[String], resolved_name: &str, phone: Option<&str>) {
+        if resolved_name.trim().is_empty() {
+            return;
+        }
+
+        for chat in self.chats.values_mut() {
+            for message in &mut chat.messages {
+                for mention in &mut message.mentions {
+                    if alias_jids.iter().any(|alias| alias == &mention.jid)
+                        && is_better_name(&resolved_name, &mention.name, &mention.jid, phone)
+                    {
+                        mention.name = resolved_name.to_string();
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -748,16 +766,7 @@ pub async fn send_message(
             let chat_jid = target_jid.to_non_ad().to_string();
             let phone = jid_phone(&target_jid.to_non_ad());
             let is_group = jid_is_group(&target_jid);
-            let mention_summaries = {
-                let store = state.store.read().await;
-                mention_jids
-                    .iter()
-                    .map(|jid| MentionSummary {
-                        jid: jid.clone(),
-                        name: store.display_name_for_jid(jid),
-                    })
-                    .collect::<Vec<_>>()
-            };
+            let mention_summaries = resolve_mention_summaries(&state, client, &mention_jids).await;
 
             let current_display_name = {
                 let store = state.store.read().await;
@@ -921,6 +930,26 @@ fn promote_receipt_status(current: Option<&str>, new_status: &str) -> String {
     }
 }
 
+fn render_text_with_mentions(text: &str, mentions: &[MentionSummary]) -> String {
+    let mut output = text.to_string();
+    for mention in mentions {
+        let token = mention
+            .jid
+            .split('@')
+            .next()
+            .unwrap_or_default()
+            .split(':')
+            .next()
+            .unwrap_or_default();
+        if token.is_empty() {
+            continue;
+        }
+        let label = format!("@{}", mention.name.trim_start_matches('+'));
+        output = output.replace(&format!("@{token}"), &label);
+    }
+    output
+}
+
 fn preview_for_message(message: &ChatMessage) -> String {
     if let Some(media) = &message.media {
         match media.kind.as_str() {
@@ -945,10 +974,10 @@ fn preview_for_message(message: &ChatMessage) -> String {
                 }
             }
             "sticker" => "🪄 Sticker".into(),
-            _ => message.text.clone(),
+            _ => render_text_with_mentions(&message.text, &message.mentions),
         }
     } else {
-        message.text.clone()
+        render_text_with_mentions(&message.text, &message.mentions)
     }
 }
 
@@ -1232,6 +1261,43 @@ async fn resolve_phone_for_jid(client: &Client, jid: &Jid) -> Option<String> {
     }
 }
 
+fn resolved_display_name_for_store(store: &DataStore, jid: &str, phone: Option<&str>) -> String {
+    let current = store.display_name_for_jid(jid);
+    if looks_like_fallback_name(&current, jid, phone) {
+        preferred_display_name(None, phone, jid)
+    } else {
+        current
+    }
+}
+
+async fn resolve_mention_summaries(
+    state: &AppState,
+    client: &Arc<Client>,
+    mention_jids: &[String],
+) -> Vec<MentionSummary> {
+    let mut summaries = Vec::with_capacity(mention_jids.len());
+
+    for mention_jid in mention_jids {
+        let phone = if let Ok(parsed) = mention_jid.parse::<Jid>() {
+            resolve_phone_for_jid(client.as_ref(), &parsed.to_non_ad()).await
+        } else {
+            None
+        };
+
+        let name = {
+            let store = state.store.read().await;
+            resolved_display_name_for_store(&store, mention_jid, phone.as_deref())
+        };
+
+        summaries.push(MentionSummary {
+            jid: mention_jid.clone(),
+            name,
+        });
+    }
+
+    summaries
+}
+
 async fn refresh_contact_profile(state: AppState, client: Arc<Client>, jid: Jid) {
     let lookup_jid = jid.to_non_ad();
     let lookup_jid_str = lookup_jid.to_string();
@@ -1300,7 +1366,7 @@ async fn refresh_contact_profile(state: AppState, client: Arc<Client>, jid: Jid)
 
     let mut store = state.store.write().await;
     store.upsert_contact(updated_contact.clone());
-    for alias_jid in alias_jids {
+    for alias_jid in &alias_jids {
         store.upsert_contact(ContactSummary {
             jid: alias_jid.clone(),
             name: contact_name.clone(),
@@ -1311,7 +1377,7 @@ async fn refresh_contact_profile(state: AppState, client: Arc<Client>, jid: Jid)
             is_registered: updated_contact.is_registered,
         });
 
-        if let Some(chat) = store.chats.get_mut(&alias_jid) {
+        if let Some(chat) = store.chats.get_mut(alias_jid.as_str()) {
             if is_better_name(&contact_name, &chat.summary.name, &contact_jid, contact_phone.as_deref()) {
                 chat.summary.name = contact_name.clone();
             }
@@ -1326,6 +1392,7 @@ async fn refresh_contact_profile(state: AppState, client: Arc<Client>, jid: Jid)
             }
         }
     }
+    store.refresh_mention_names(&alias_jids, &contact_name, contact_phone.as_deref());
 }
 
 async fn refresh_group_metadata(state: AppState, client: Arc<Client>, jid: Jid) {
@@ -1405,23 +1472,15 @@ async fn handle_incoming_message(
         store.display_name_for_jid(&sender_jid)
     };
     let text = extract_text(&msg);
+    let mention_jids = extract_context_info(&msg)
+        .map(|ctx| ctx.mentioned_jid.clone())
+        .unwrap_or_default();
+    let mention_summaries = resolve_mention_summaries(&state, &client, &mention_jids).await;
     let (mentions, media, media_blob) = {
-        let store = state.store.read().await;
-        let mentions = extract_context_info(&msg)
-            .map(|ctx| {
-                ctx.mentioned_jid
-                    .iter()
-                    .map(|jid| MentionSummary {
-                        jid: jid.clone(),
-                        name: store.display_name_for_jid(jid),
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
         let media = extract_media(&msg, &chat_jid, &info.id);
         match media {
-            Some((attachment, blob)) => (mentions, Some(attachment), Some(blob)),
-            None => (mentions, None, None),
+            Some((attachment, blob)) => (mention_summaries, Some(attachment), Some(blob)),
+            None => (mention_summaries, None, None),
         }
     };
 
@@ -1488,12 +1547,25 @@ async fn handle_incoming_message(
         );
     }
 
+    let state_for_mentions = state.clone();
+    let client_for_mentions = client.clone();
+
     if jid_is_group(&chat) {
         tokio::spawn(refresh_group_metadata(state.clone(), client.clone(), chat));
         tokio::spawn(refresh_contact_profile(state, client, sender));
     } else {
         tokio::spawn(ensure_presence_subscription(client.clone(), chat.clone()));
         tokio::spawn(refresh_contact_profile(state, client, chat));
+    }
+
+    for mention_jid in mention_jids {
+        if let Ok(parsed) = mention_jid.parse::<Jid>() {
+            tokio::spawn(refresh_contact_profile(
+                state_for_mentions.clone(),
+                client_for_mentions.clone(),
+                parsed.to_non_ad(),
+            ));
+        }
     }
 }
 
