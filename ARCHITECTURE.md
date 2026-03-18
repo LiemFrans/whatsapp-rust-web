@@ -203,19 +203,19 @@ All fields are `Arc`-wrapped for cheap cloning. Mutable state uses `RwLock` (fro
 
 All endpoints are prefixed with `/api` and proxied from the frontend via Next.js rewrites.
 
-| Method | Path | Handler | Description |
-|--------|------|---------|-------------|
-| `GET` | `/api/auth/qr` | `get_qr` | Returns current QR code + connection status |
-| `GET` | `/api/auth/status` | `get_status` | Returns `is_connected` + `is_syncing` flags |
-| `POST` | `/api/auth/logout` | `logout` | Disconnects session, deletes SQLite DB, resets store |
-| `GET` | `/api/bootstrap` | `get_bootstrap` | Full initial payload for the UI |
-| `GET` | `/api/chats` | `get_chats` | Sorted chat summaries |
-| `GET` | `/api/contacts` | `get_contacts` | Sorted contact list |
-| `GET` | `/api/chats/:jid/messages` | `get_chat_messages` | Messages for a specific chat (404 if unknown) |
-| `POST` | `/api/chats/:jid/read` | `mark_chat_read` | Locally zeroes unread count |
-| `POST` | `/api/chats/:jid/typing` | `update_typing` | Forwards typing state to WhatsApp |
-| `POST` | `/api/messages/send` | `send_message` | Sends a text message (with optional mentions) |
-| `GET` | `/api/media/:chat_jid/:message_id` | `get_media` | Downloads + proxies media from WhatsApp servers |
+| Method | Path | Handler | Description | `whatsapp-rust` |
+|--------|------|---------|-------------|:---------------:|
+| `GET` | `/api/auth/qr` | `get_qr` | Returns current QR code + connection status | — |
+| `GET` | `/api/auth/status` | `get_status` | Returns `is_connected` + `is_syncing` flags | — |
+| `POST` | `/api/auth/logout` | `logout` | Disconnects session, deletes SQLite DB, resets store | ✅ `client.disconnect()` |
+| `GET` | `/api/bootstrap` | `get_bootstrap` | Full initial payload for the UI | — |
+| `GET` | `/api/chats` | `get_chats` | Sorted chat summaries | — |
+| `GET` | `/api/contacts` | `get_contacts` | Sorted contact list | — |
+| `GET` | `/api/chats/:jid/messages` | `get_chat_messages` | Messages for a specific chat (404 if unknown) | — |
+| `POST` | `/api/chats/:jid/read` | `mark_chat_read` | Locally zeroes unread count | — |
+| `POST` | `/api/chats/:jid/typing` | `update_typing` | Forwards typing state to WhatsApp | ✅ `client.chatstate()` |
+| `POST` | `/api/messages/send` | `send_message` | Sends a text message (with optional mentions) | ✅ `client.send_message()` |
+| `GET` | `/api/media/:chat_jid/:message_id` | `get_media` | Downloads + proxies media from WhatsApp servers | ✅ `client.download_from_params()` |
 
 #### Send Message Flow
 

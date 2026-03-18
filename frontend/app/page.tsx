@@ -39,6 +39,8 @@ import {
   WhatsAppLogo,
 } from "./components/Icons";
 import { MessageMedia } from "./components/MessageMedia";
+import { MediaPicker, type PickerTab } from "./components/MediaPicker";
+import type { StickerInfo } from "./components/StickerPicker";
 
 export default function Home() {
   const [bootstrap, setBootstrap] = useState<BootstrapResponse | null>(null);
@@ -53,7 +55,8 @@ export default function Home() {
   const [showNewChat, setShowNewChat] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
-  const [picker, setPicker] = useState<"emoji" | "gif" | "sticker" | null>(null);
+  const [picker, setPicker] = useState<PickerTab | null>(null);
+  const [stickers, setStickers] = useState<StickerInfo[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<number | null>(null);
 
@@ -333,6 +336,103 @@ export default function Home() {
       window.setTimeout(() => setSendStatus(null), 3000);
     },
     [activeChat, extractMentions, messageText, refresh],
+  );
+
+  // ── Fetch stickers ────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!isConnected) return;
+    const fetchStickers = async () => {
+      try {
+        const res = await fetch("/api/stickers", { cache: "no-store" });
+        if (res.ok) {
+          const data = await res.json();
+          setStickers(data.stickers?.map((s: Record<string, unknown>) => ({
+            chatJid: s.chat_jid,
+            messageId: s.message_id,
+            downloadPath: s.download_path,
+            isAnimated: s.is_animated,
+          })) ?? []);
+        }
+      } catch { /* ignore */ }
+    };
+    void fetchStickers();
+    const id = setInterval(fetchStickers, 15000);
+    return () => clearInterval(id);
+  }, [isConnected]);
+
+  // ── Media send handlers ────────────────────────────────────────────────
+
+  const handleEmojiSelect = useCallback(
+    (emoji: string) => {
+      setMessageText((prev) => prev + emoji);
+    },
+    [],
+  );
+
+  const handleGifSelect = useCallback(
+    async (gifUrl: string, mp4Url: string | null, width: number, height: number) => {
+      if (!activeChat) return;
+      setPicker(null);
+      setSendStatus("Sending GIF…");
+      try {
+        const res = await fetch("/api/messages/send-media", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jid: activeChat.jid,
+            phone: activeChat.phone ?? phoneFromJid(activeChat.jid),
+            url: mp4Url ?? gifUrl,
+            media_type: "gif",
+            width,
+            height,
+          }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          setSendStatus("GIF sent!");
+          await refresh(activeChat.jid);
+        } else {
+          setSendStatus(data.error ?? "Failed to send GIF");
+        }
+      } catch {
+        setSendStatus("Failed to send GIF");
+      }
+      window.setTimeout(() => setSendStatus(null), 3000);
+    },
+    [activeChat, refresh],
+  );
+
+  const handleStickerSelect = useCallback(
+    async (sticker: StickerInfo) => {
+      if (!activeChat) return;
+      setPicker(null);
+      setSendStatus("Sending sticker…");
+      try {
+        const stickerUrl = `/api/media/${encodeURIComponent(sticker.chatJid)}/${encodeURIComponent(sticker.messageId)}`;
+        const res = await fetch("/api/messages/send-media", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jid: activeChat.jid,
+            phone: activeChat.phone ?? phoneFromJid(activeChat.jid),
+            url: stickerUrl,
+            media_type: "sticker",
+          }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          setSendStatus("Sticker sent!");
+          await refresh(activeChat.jid);
+        } else {
+          setSendStatus(data.error ?? "Failed to send sticker");
+        }
+      } catch {
+        setSendStatus("Failed to send sticker");
+      }
+      window.setTimeout(() => setSendStatus(null), 3000);
+    },
+    [activeChat, refresh],
   );
 
   // ── Loading state ──────────────────────────────────────────────────────
@@ -692,40 +792,43 @@ export default function Home() {
                   </div>
                 ) : null}
                 {picker ? (
-                  <div className="mb-2 rounded-2xl bg-white px-3 py-3 shadow-sm">
-                    <div className="mb-2 flex items-center justify-between text-xs font-medium uppercase tracking-wide text-wa-text-secondary">
-                      <span>{picker === "emoji" ? "Emoji" : picker === "gif" ? "GIF shortcuts" : "Sticker shortcuts"}</span>
-                      <button onClick={() => setPicker(null)} type="button" className="text-wa-teal">Close</button>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {(picker === "emoji"
-                        ? ["😀", "😂", "😍", "🙏", "🔥", "🎉", "👍", "❤️"]
-                        : picker === "gif"
-                          ? ["[GIF] thumbs up", "[GIF] applause", "[GIF] wow", "[GIF] hello"]
-                          : ["[Sticker] 👍", "[Sticker] 😂", "[Sticker] ❤️", "[Sticker] 🎉"]
-                      ).map((item) => (
-                        <button
-                          key={item}
-                          type="button"
-                          onClick={() => setMessageText((current) => `${current}${current ? " " : ""}${item}`)}
-                          className="rounded-full bg-wa-input-bg px-3 py-2 text-sm text-wa-text transition hover:bg-gray-200"
-                        >
-                          {item}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+                  <MediaPicker
+                    activeTab={picker}
+                    onTabChange={(tab) => setPicker(tab)}
+                    onClose={() => setPicker(null)}
+                    onEmojiSelect={handleEmojiSelect}
+                    onGifSelect={handleGifSelect}
+                    onStickerSelect={handleStickerSelect}
+                    stickers={stickers}
+                  />
                 ) : null}
                 <form onSubmit={handleSend} className="flex items-center gap-3">
-                  <div className="flex items-center gap-2 text-xl text-wa-icon">
-                    <button type="button" onClick={() => setPicker((current) => current === "emoji" ? null : "emoji")} className="rounded-full p-2 transition hover:bg-white">
+                  <div className="flex items-center gap-1 text-xl text-wa-icon">
+                    <button
+                      type="button"
+                      onClick={() => setPicker((current) => current === "emoji" ? null : "emoji")}
+                      className={`rounded-full p-2 transition hover:bg-white ${picker === "emoji" ? "bg-white text-wa-teal" : ""}`}
+                      title="Emoji"
+                    >
                       😊
                     </button>
-                    <button type="button" onClick={() => setPicker((current) => current === "gif" ? null : "gif")} className="rounded-full p-2 text-sm font-semibold transition hover:bg-white">
+                    <button
+                      type="button"
+                      onClick={() => setPicker((current) => current === "gif" ? null : "gif")}
+                      className={`rounded-full p-2 text-xs font-bold transition hover:bg-white ${picker === "gif" ? "bg-white text-wa-teal" : ""}`}
+                      title="GIF"
+                    >
                       GIF
                     </button>
-                    <button type="button" onClick={() => setPicker((current) => current === "sticker" ? null : "sticker")} className="rounded-full p-2 transition hover:bg-white">
-                      🪄
+                    <button
+                      type="button"
+                      onClick={() => setPicker((current) => current === "sticker" ? null : "sticker")}
+                      className={`rounded-full p-2 transition hover:bg-white ${picker === "sticker" ? "bg-white text-wa-teal" : ""}`}
+                      title="Stickers"
+                    >
+                      <svg viewBox="0 0 24 24" width="20" height="20" className="fill-current">
+                        <path d="M21.8 10.3c-.1-.3-.2-.5-.4-.7l-.1-.1c-.1-.1-.1-.2-.2-.3l-7.3-7.3c-.1-.1-.2-.1-.3-.2l-.1-.1c-.2-.2-.5-.3-.7-.4-.3-.1-.6-.2-.9-.2H5C3.3 1 2 2.3 2 4v16c0 1.7 1.3 3 3 3h14c1.7 0 3-1.3 3-3v-8.8c0-.3-.1-.6-.2-.9zM14 3.4 20.6 10H15c-.6 0-1-.4-1-1V3.4zM20 20c0 .6-.4 1-1 1H5c-.6 0-1-.4-1-1V4c0-.6.4-1 1-1h7v6c0 1.7 1.3 3 3 3h6v8z" />
+                      </svg>
                     </button>
                   </div>
                   <input

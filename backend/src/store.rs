@@ -3,11 +3,32 @@
 use crate::helpers::*;
 use crate::models::*;
 
+const MAX_STICKERS: usize = 100;
+
 impl DataStore {
     pub fn reset(&mut self) {
         self.chats.clear();
         self.contacts.clear();
         self.media.clear();
+        self.stickers.clear();
+    }
+
+    pub fn record_sticker(&mut self, record: StickerRecord) {
+        // Deduplicate by message_id
+        if self.stickers.iter().any(|s| s.message_id == record.message_id) {
+            return;
+        }
+        self.stickers.push(record);
+        // Keep only the most recent stickers
+        if self.stickers.len() > MAX_STICKERS {
+            self.stickers.drain(0..self.stickers.len() - MAX_STICKERS);
+        }
+    }
+
+    pub fn recent_stickers(&self) -> Vec<StickerRecord> {
+        let mut stickers = self.stickers.clone();
+        stickers.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
+        stickers
     }
 
     pub fn sorted_chats(&self) -> Vec<ChatSummary> {

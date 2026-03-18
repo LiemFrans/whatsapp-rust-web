@@ -25,11 +25,14 @@ pub async fn handle_event(event: Event, client: Arc<Client>, state: AppState) {
             log::info!("✅ WhatsApp connected!");
             state.is_connected.store(true, Ordering::SeqCst);
             *state.qr_code.write().await = None;
+            // New session → sender keys must be re-distributed
+            state.warmed_groups.write().await.clear();
             tokio::spawn(wait_for_startup_sync(state.clone(), client.clone()));
         }
         Event::Disconnected(_) | Event::LoggedOut(_) | Event::ConnectFailure(_) => {
             state.is_connected.store(false, Ordering::SeqCst);
             state.is_syncing.store(false, Ordering::SeqCst);
+            state.warmed_groups.write().await.clear();
         }
         Event::Message(msg, info) => {
             let preview = extract_text(&msg);
@@ -236,6 +239,21 @@ pub async fn handle_incoming_message(
             display_name.clone()
         };
 
+        // Record sticker for the picker
+        if let Some(ref media_attachment) = media {
+            if media_attachment.kind == "sticker" {
+                if let Some(ref dl_path) = media_attachment.download_path {
+                    store.record_sticker(StickerRecord {
+                        chat_jid: chat_jid.clone(),
+                        message_id: info.id.clone(),
+                        download_path: dl_path.clone(),
+                        is_animated: false, // determined at render
+                        timestamp_ms: message_timestamp_ms(&info),
+                    });
+                }
+            }
+        }
+
         store.record_message(
             chat_jid.clone(),
             Some(chat_display_name),
@@ -269,6 +287,8 @@ pub async fn handle_incoming_message(
     let client_for_mentions = client.clone();
 
     if jid_is_group(&chat) {
+        // We received a message in this group → SKDM is exchanged, mark warm
+        state.warmed_groups.write().await.insert(chat_jid.clone());
         tokio::spawn(refresh_group_metadata(state.clone(), client.clone(), chat));
         tokio::spawn(refresh_contact_profile(state, client, sender));
     } else {

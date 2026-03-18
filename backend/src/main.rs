@@ -11,7 +11,9 @@
 //!   POST /api/chats/:jid/typing        → send chat state updates to WhatsApp
 //!   GET  /api/contacts                 → known contacts
 //!   POST /api/messages/send            → send a WhatsApp message
+//!   POST /api/messages/send-media       → send media (sticker/GIF/image) via URL
 //!   GET  /api/media/:chat_jid/:msg_id  → download stored media for rendering
+//!   GET  /api/stickers                  → list received sticker records
 
 mod events;
 mod handlers;
@@ -48,7 +50,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/chats/:jid/typing", post(handlers::update_typing))
         .route("/api/contacts", get(handlers::get_contacts))
         .route("/api/messages/send", post(handlers::send_message))
+        .route("/api/messages/send-media", post(handlers::send_media))
         .route("/api/media/:chat_jid/:message_id", get(handlers::get_media))
+        .route("/api/stickers", get(handlers::get_stickers))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }

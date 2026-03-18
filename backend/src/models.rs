@@ -1,6 +1,6 @@
 //! Data models, request/response types, and shared application state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -24,6 +24,11 @@ pub struct AppState {
     pub client: Arc<RwLock<Option<Arc<Client>>>>,
     pub store: Arc<RwLock<DataStore>>,
     pub db_path: Arc<String>,
+    /// Groups where we have successfully sent at least one message this
+    /// session, meaning sender-key distribution (SKDM) is already done.
+    /// Media sends to groups NOT in this set will first send a lightweight
+    /// text to establish SKDM and avoid retry storms.
+    pub warmed_groups: Arc<RwLock<HashSet<String>>>,
 }
 
 impl AppState {
@@ -35,6 +40,7 @@ impl AppState {
             client: Arc::new(RwLock::new(None)),
             store: Arc::new(RwLock::new(DataStore::default())),
             db_path: Arc::new(db_path.into()),
+            warmed_groups: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 }
@@ -129,11 +135,21 @@ pub struct ChatRecord {
     pub messages: Vec<ChatMessage>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StickerRecord {
+    pub chat_jid: String,
+    pub message_id: String,
+    pub download_path: String,
+    pub is_animated: bool,
+    pub timestamp_ms: i64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DataStore {
     pub chats: HashMap<String, ChatRecord>,
     pub contacts: HashMap<String, ContactSummary>,
     pub media: HashMap<String, MediaBlob>,
+    pub stickers: Vec<StickerRecord>,
 }
 
 // ---------------------------------------------------------------------------
@@ -206,4 +222,20 @@ pub struct LogoutResponse {
 #[derive(Serialize)]
 pub struct ErrorResponse {
     pub error: String,
+}
+
+#[derive(Serialize)]
+pub struct StickersResponse {
+    pub stickers: Vec<StickerRecord>,
+}
+
+#[derive(Deserialize)]
+pub struct SendMediaRequest {
+    pub phone: Option<String>,
+    pub jid: Option<String>,
+    pub url: String,
+    pub media_type: String, // "sticker", "gif", "image"
+    pub caption: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
 }
