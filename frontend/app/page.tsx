@@ -25,8 +25,10 @@ interface ApiMessage {
     kind: string;
     mime_type: string | null;
     caption: string | null;
+    title: string | null;
     file_name: string | null;
     file_length: number | null;
+    page_count: number | null;
     width: number | null;
     height: number | null;
     duration_seconds: number | null;
@@ -34,6 +36,7 @@ interface ApiMessage {
     is_gif: boolean;
     is_sticker: boolean;
     download_path: string | null;
+    preview_image_url: string | null;
   } | null;
   receipt_status: string | null;
 }
@@ -89,8 +92,10 @@ function normalizeMessage(input: Partial<ApiMessage> | null | undefined): ApiMes
           kind: input.media.kind ?? "unknown",
           mime_type: input.media.mime_type ?? null,
           caption: input.media.caption ?? null,
+          title: input.media.title ?? null,
           file_name: input.media.file_name ?? null,
           file_length: input.media.file_length ?? null,
+          page_count: input.media.page_count ?? null,
           width: input.media.width ?? null,
           height: input.media.height ?? null,
           duration_seconds: input.media.duration_seconds ?? null,
@@ -98,6 +103,7 @@ function normalizeMessage(input: Partial<ApiMessage> | null | undefined): ApiMes
           is_gif: Boolean(input.media.is_gif),
           is_sticker: Boolean(input.media.is_sticker),
           download_path: input.media.download_path ?? null,
+          preview_image_url: input.media.preview_image_url ?? null,
         }
       : null,
     receipt_status: input?.receipt_status ?? null,
@@ -271,6 +277,26 @@ function formatFileSize(bytes: number | null) {
   return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
+function fileExtension(fileName: string | null | undefined, mimeType: string | null | undefined) {
+  const fromName = fileName?.split(".").pop()?.trim();
+  if (fromName) return fromName.slice(0, 6).toUpperCase();
+
+  const subtype = mimeType?.split("/")[1]?.split(";")[0]?.trim();
+  if (!subtype) return "FILE";
+  if (subtype === "pdf") return "PDF";
+  return subtype.replace(/[^a-z0-9]/gi, "").slice(0, 6).toUpperCase() || "FILE";
+}
+
+function documentMeta(media: NonNullable<ApiMessage["media"]>) {
+  const items = [formatFileSize(media.file_length)];
+  if (media.page_count) items.push(`${media.page_count} page${media.page_count > 1 ? "s" : ""}`);
+  if (!media.page_count && media.mime_type) {
+    const subtype = media.mime_type.split("/")[1]?.split(";")[0]?.replace(/[.+_-]/g, " ");
+    if (subtype) items.push(subtype.toUpperCase());
+  }
+  return items.filter(Boolean).join(" • ");
+}
+
 function formatPresence(chat: ApiChat) {
   const phoneLabel = !chat.is_group && chat.phone ? `+${chat.phone}` : null;
 
@@ -320,6 +346,11 @@ function shouldRenderMessageText(message: ApiMessage) {
   const text = (message.text || message.media?.caption || "").trim();
   if (!text) return false;
   if (text === "Sticker" || text === "<non-text>") return false;
+  if (message.media?.kind === "document") {
+    const fileName = message.media.file_name?.trim();
+    const title = message.media.title?.trim();
+    if (text === fileName || text === title) return false;
+  }
   return true;
 }
 
@@ -343,23 +374,26 @@ function renderTextWithMentions(message: ApiMessage) {
 function MessageMedia({ message }: { message: ApiMessage }) {
   if (!message.media?.download_path) return null;
 
-  if (message.media.kind === "image" || message.media.kind === "sticker") {
+  const media = message.media;
+  const downloadPath = media.download_path!;
+
+  if (media.kind === "image" || media.kind === "sticker") {
     return (
       <img
-        src={message.media.download_path}
-        alt={message.media.caption ?? message.media.file_name ?? message.media.kind}
+        src={downloadPath}
+        alt={media.caption ?? media.file_name ?? media.kind}
         className={clsx(
           "mb-2 max-h-72 rounded-2xl object-contain",
-          message.media.kind === "sticker" && "max-h-40 bg-transparent",
+          media.kind === "sticker" && "max-h-40 bg-transparent",
         )}
       />
     );
   }
 
-  if (message.media.kind === "video") {
+  if (media.kind === "video") {
     return (
       <video
-        src={message.media.download_path}
+        src={downloadPath}
         controls
         playsInline
         className="mb-2 max-h-80 rounded-2xl bg-black"
@@ -367,22 +401,59 @@ function MessageMedia({ message }: { message: ApiMessage }) {
     );
   }
 
-  if (message.media.kind === "audio") {
-    return <audio src={message.media.download_path} controls className="mb-2 w-full max-w-xs" />;
+  if (media.kind === "audio") {
+    return <audio src={downloadPath} controls className="mb-2 w-full max-w-xs" />;
   }
+
+  const fileName = media.file_name ?? media.title ?? "Document";
+  const extension = fileExtension(media.file_name, media.mime_type);
+  const meta = documentMeta(media);
 
   return (
     <a
-      href={message.media.download_path}
+      href={downloadPath}
       target="_blank"
       rel="noreferrer"
-      className="mb-2 flex items-center gap-3 rounded-2xl bg-black/5 px-3 py-3 text-sm text-wa-text transition hover:bg-black/10"
+      className="mb-2 block w-[320px] max-w-full overflow-hidden rounded-2xl bg-[#f0f2f5] text-sm text-wa-text shadow-sm ring-1 ring-black/5 transition hover:bg-[#e8ecef]"
     >
-      <span className="text-lg">📎</span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate font-medium">{message.media.file_name ?? "Document"}</span>
-        <span className="block text-xs text-wa-text-secondary">{formatFileSize(message.media.file_length)}</span>
-      </span>
+      <div className="relative h-40 bg-[#dfe5e7]">
+        {media.preview_image_url ? (
+          <img
+            src={media.preview_image_url}
+            alt={fileName}
+            className="h-full w-full object-cover"
+          />
+        ) : (
+          <div className="flex h-full items-center justify-center bg-gradient-to-br from-[#dde4e6] to-[#c9d3d8] px-4 text-center">
+            <div>
+              <div className="text-4xl font-semibold tracking-tight text-[#41525d]">{extension}</div>
+              <div className="mt-2 text-xs font-medium uppercase tracking-[0.2em] text-[#667781]">
+                {media.page_count ? `${media.page_count} page${media.page_count > 1 ? "s" : ""}` : "Document preview"}
+              </div>
+            </div>
+          </div>
+        )}
+        <div className="absolute left-3 top-3 rounded-lg bg-white/90 px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-[#111b21] shadow-sm">
+          {extension}
+        </div>
+        <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/60 via-black/20 to-transparent px-3 py-3">
+          <div className="truncate text-sm font-medium text-white">{fileName}</div>
+          {media.title && media.title !== fileName ? (
+            <div className="truncate text-xs text-white/80">{media.title}</div>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="flex items-center gap-3 px-3 py-3">
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-white text-xs font-semibold uppercase tracking-wide text-[#54656f] shadow-sm">
+          {extension}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="truncate font-medium text-wa-text">{fileName}</div>
+          <div className="truncate text-xs text-wa-text-secondary">{meta || "Tap to open"}</div>
+        </div>
+        <div className="shrink-0 text-xs font-semibold text-wa-teal">Open</div>
+      </div>
     </a>
   );
 }

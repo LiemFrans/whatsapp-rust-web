@@ -23,6 +23,8 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
@@ -73,8 +75,10 @@ pub struct MediaAttachment {
     pub kind: String,
     pub mime_type: Option<String>,
     pub caption: Option<String>,
+    pub title: Option<String>,
     pub file_name: Option<String>,
     pub file_length: Option<u64>,
+    pub page_count: Option<u32>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub duration_seconds: Option<u32>,
@@ -82,6 +86,7 @@ pub struct MediaAttachment {
     pub is_gif: bool,
     pub is_sticker: bool,
     pub download_path: Option<String>,
+    pub preview_image_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -695,27 +700,74 @@ pub async fn send_message(
         ));
     }
 
-    let target_jid = if let Some(jid) = payload.jid.as_deref().filter(|value| !value.trim().is_empty()) {
-        jid.parse::<Jid>().map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "\"jid\" is invalid".into(),
-                }),
-            )
-        })?
+    let requested_jid = payload
+        .jid
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value.parse::<Jid>().map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "\"jid\" is invalid".into(),
+                    }),
+                )
+            })
+        })
+        .transpose()?;
+
+    let explicit_phone = normalize_phone(payload.phone.as_deref().unwrap_or_default());
+    let requested_jid_phone = requested_jid.as_ref().and_then(jid_phone);
+    let fallback_store_phone = if explicit_phone.is_empty() {
+        requested_jid.as_ref().and_then(|jid| {
+            let jid_key = jid.to_non_ad().to_string();
+            state
+                .store
+                .try_read()
+                .ok()
+                .and_then(|store| store.contacts.get(&jid_key).and_then(|contact| contact.phone.clone()))
+        })
     } else {
-        let phone = normalize_phone(payload.phone.as_deref().unwrap_or_default());
-        if phone.is_empty() || !phone.chars().all(|c| c.is_ascii_digit()) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "Provide a valid \"jid\" or a digit-only \"phone\" (E.164 format).".into(),
-                }),
-            ));
-        }
-        Jid::pn(&phone)
+        None
     };
+
+    let resolved_phone = if explicit_phone.is_empty() {
+        requested_jid_phone.or(fallback_store_phone)
+    } else {
+        Some(explicit_phone.clone())
+    };
+
+    let target_jid = match requested_jid.clone() {
+        Some(jid) if jid_is_group(&jid) => jid,
+        Some(_) => {
+            let phone = resolved_phone.clone().filter(|value| value.chars().all(|c| c.is_ascii_digit())).ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "Direct chats require a valid mapped phone number before sending.".into(),
+                    }),
+                )
+            })?;
+            Jid::pn(&phone)
+        }
+        None => {
+            let phone = resolved_phone.clone().filter(|value| value.chars().all(|c| c.is_ascii_digit())).ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "Provide a valid \"jid\" or a digit-only \"phone\" (E.164 format).".into(),
+                    }),
+                )
+            })?;
+            Jid::pn(&phone)
+        }
+    };
+
+    let chat_store_jid = requested_jid
+        .as_ref()
+        .map(|jid| jid.to_non_ad().to_string())
+        .unwrap_or_else(|| target_jid.to_non_ad().to_string());
 
     let mention_jids: Vec<String> = payload
         .mentions
@@ -761,11 +813,24 @@ pub async fn send_message(
         }
     };
 
+    log::info!(
+        "Sending outbound message to {} (store chat {})",
+        target_jid,
+        chat_store_jid
+    );
+
     match client.send_message(target_jid.clone(), wa_message).await {
         Ok(msg_id) => {
-            let chat_jid = target_jid.to_non_ad().to_string();
-            let phone = jid_phone(&target_jid.to_non_ad());
-            let is_group = jid_is_group(&target_jid);
+            let chat_jid = chat_store_jid;
+            let phone = if jid_is_group(&target_jid) {
+                None
+            } else {
+                resolved_phone.clone().or_else(|| jid_phone(&target_jid.to_non_ad()))
+            };
+            let is_group = requested_jid
+                .as_ref()
+                .map(jid_is_group)
+                .unwrap_or_else(|| jid_is_group(&target_jid));
             let mention_summaries = resolve_mention_summaries(&state, client, &mention_jids).await;
 
             let current_display_name = {
@@ -1086,6 +1151,18 @@ fn build_media_blob(
     })
 }
 
+fn inline_jpeg_preview_url(thumbnail: Option<&Vec<u8>>) -> Option<String> {
+    let bytes = thumbnail?;
+    if bytes.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "data:image/jpeg;base64,{}",
+        BASE64_STANDARD.encode(bytes)
+    ))
+}
+
 fn extract_media(message: &wa::Message, chat_jid: &str, message_id: &str) -> Option<(MediaAttachment, MediaBlob)> {
     if let Some(image) = message.image_message.as_ref() {
         let blob = build_media_blob(
@@ -1103,8 +1180,10 @@ fn extract_media(message: &wa::Message, chat_jid: &str, message_id: &str) -> Opt
                 kind: "image".into(),
                 mime_type: image.mimetype.clone(),
                 caption: image.caption.clone(),
+                title: None,
                 file_name: None,
                 file_length: image.file_length,
+                page_count: None,
                 width: image.width,
                 height: image.height,
                 duration_seconds: None,
@@ -1112,6 +1191,7 @@ fn extract_media(message: &wa::Message, chat_jid: &str, message_id: &str) -> Opt
                 is_gif: false,
                 is_sticker: false,
                 download_path: Some(format!("/api/media/{chat_jid}/{message_id}")),
+                preview_image_url: None,
             },
             blob,
         ));
@@ -1132,8 +1212,10 @@ fn extract_media(message: &wa::Message, chat_jid: &str, message_id: &str) -> Opt
                 kind: "video".into(),
                 mime_type: video.mimetype.clone(),
                 caption: video.caption.clone(),
+                title: None,
                 file_name: None,
                 file_length: video.file_length,
+                page_count: None,
                 width: video.width,
                 height: video.height,
                 duration_seconds: video.seconds,
@@ -1141,6 +1223,7 @@ fn extract_media(message: &wa::Message, chat_jid: &str, message_id: &str) -> Opt
                 is_gif: video.gif_playback.unwrap_or(false),
                 is_sticker: false,
                 download_path: Some(format!("/api/media/{chat_jid}/{message_id}")),
+                preview_image_url: None,
             },
             blob,
         ));
@@ -1161,8 +1244,10 @@ fn extract_media(message: &wa::Message, chat_jid: &str, message_id: &str) -> Opt
                 kind: "document".into(),
                 mime_type: document.mimetype.clone(),
                 caption: document.caption.clone(),
+                title: document.title.clone(),
                 file_name: document.file_name.clone(),
                 file_length: document.file_length,
+                page_count: document.page_count,
                 width: None,
                 height: None,
                 duration_seconds: None,
@@ -1170,6 +1255,7 @@ fn extract_media(message: &wa::Message, chat_jid: &str, message_id: &str) -> Opt
                 is_gif: false,
                 is_sticker: false,
                 download_path: Some(format!("/api/media/{chat_jid}/{message_id}")),
+                preview_image_url: inline_jpeg_preview_url(document.jpeg_thumbnail.as_ref()),
             },
             blob,
         ));
@@ -1190,8 +1276,10 @@ fn extract_media(message: &wa::Message, chat_jid: &str, message_id: &str) -> Opt
                 kind: "audio".into(),
                 mime_type: audio.mimetype.clone(),
                 caption: None,
+                title: None,
                 file_name: None,
                 file_length: audio.file_length,
+                page_count: None,
                 width: None,
                 height: None,
                 duration_seconds: audio.seconds,
@@ -1199,6 +1287,7 @@ fn extract_media(message: &wa::Message, chat_jid: &str, message_id: &str) -> Opt
                 is_gif: false,
                 is_sticker: false,
                 download_path: Some(format!("/api/media/{chat_jid}/{message_id}")),
+                preview_image_url: None,
             },
             blob,
         ));
@@ -1220,8 +1309,10 @@ fn extract_media(message: &wa::Message, chat_jid: &str, message_id: &str) -> Opt
                 kind: "sticker".into(),
                 mime_type: mime,
                 caption: None,
+                title: None,
                 file_name: None,
                 file_length: sticker.file_length,
+                page_count: None,
                 width: None,
                 height: None,
                 duration_seconds: None,
@@ -1229,6 +1320,7 @@ fn extract_media(message: &wa::Message, chat_jid: &str, message_id: &str) -> Opt
                 is_gif: false,
                 is_sticker: true,
                 download_path: Some(format!("/api/media/{chat_jid}/{message_id}")),
+                preview_image_url: None,
             },
             blob,
         ));
