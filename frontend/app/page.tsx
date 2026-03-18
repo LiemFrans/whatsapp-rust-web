@@ -10,453 +10,35 @@ import {
 } from "react";
 import QRCode from "react-qr-code";
 
-type SidebarView = "chats" | "contacts";
-
-interface ApiMessage {
-  id: string;
-  chat_jid: string;
-  sender_jid: string;
-  sender_name: string | null;
-  text: string;
-  timestamp_ms: number;
-  from_me: boolean;
-  mentions: { jid: string; name: string }[];
-  media: {
-    kind: string;
-    mime_type: string | null;
-    caption: string | null;
-    title: string | null;
-    file_name: string | null;
-    file_length: number | null;
-    page_count: number | null;
-    width: number | null;
-    height: number | null;
-    duration_seconds: number | null;
-    is_voice_note: boolean;
-    is_gif: boolean;
-    is_sticker: boolean;
-    download_path: string | null;
-    preview_image_url: string | null;
-  } | null;
-  receipt_status: string | null;
-}
-
-interface ApiChat {
-  jid: string;
-  name: string;
-  phone: string | null;
-  is_group: boolean;
-  preview: string | null;
-  timestamp_ms: number | null;
-  unread_count: number;
-  archived: boolean;
-  muted: boolean;
-  avatar_url: string | null;
-  status: string | null;
-  typing: string | null;
-  is_online: boolean;
-  last_seen_ms: number | null;
-}
-
-interface ApiContact {
-  jid: string;
-  name: string;
-  phone: string | null;
-  status: string | null;
-  avatar_url: string | null;
-  is_business: boolean;
-  is_registered: boolean;
-}
-
-interface BootstrapResponse {
-  qr_code: string | null;
-  is_connected: boolean;
-  is_syncing: boolean;
-  chats: ApiChat[];
-  contacts: ApiContact[];
-  logout_hint: string | null;
-}
-
-function normalizeMessage(input: Partial<ApiMessage> | null | undefined): ApiMessage {
-  return {
-    id: input?.id ?? `${Date.now()}`,
-    chat_jid: input?.chat_jid ?? "",
-    sender_jid: input?.sender_jid ?? "",
-    sender_name: input?.sender_name ?? null,
-    text: input?.text ?? "",
-    timestamp_ms: input?.timestamp_ms ?? Date.now(),
-    from_me: Boolean(input?.from_me),
-    mentions: Array.isArray(input?.mentions) ? input!.mentions : [],
-    media: input?.media
-      ? {
-          kind: input.media.kind ?? "unknown",
-          mime_type: input.media.mime_type ?? null,
-          caption: input.media.caption ?? null,
-          title: input.media.title ?? null,
-          file_name: input.media.file_name ?? null,
-          file_length: input.media.file_length ?? null,
-          page_count: input.media.page_count ?? null,
-          width: input.media.width ?? null,
-          height: input.media.height ?? null,
-          duration_seconds: input.media.duration_seconds ?? null,
-          is_voice_note: Boolean(input.media.is_voice_note),
-          is_gif: Boolean(input.media.is_gif),
-          is_sticker: Boolean(input.media.is_sticker),
-          download_path: input.media.download_path ?? null,
-          preview_image_url: input.media.preview_image_url ?? null,
-        }
-      : null,
-    receipt_status: input?.receipt_status ?? null,
-  };
-}
-
-function normalizeChat(input: Partial<ApiChat> | null | undefined): ApiChat {
-  const derivedPhone = input?.phone ?? phoneFromJid(input?.jid ?? null);
-  return {
-    jid: input?.jid ?? "",
-    name: input?.name ?? derivedPhone ?? input?.jid ?? "Unknown",
-    phone: derivedPhone,
-    is_group: Boolean(input?.is_group),
-    preview: input?.preview ?? null,
-    timestamp_ms: input?.timestamp_ms ?? null,
-    unread_count: input?.unread_count ?? 0,
-    archived: Boolean(input?.archived),
-    muted: Boolean(input?.muted),
-    avatar_url: input?.avatar_url ?? null,
-    status: input?.status ?? null,
-    typing: input?.typing ?? null,
-    is_online: Boolean(input?.is_online),
-    last_seen_ms: input?.last_seen_ms ?? null,
-  };
-}
-
-function normalizeContact(input: Partial<ApiContact> | null | undefined): ApiContact {
-  const derivedPhone = input?.phone ?? phoneFromJid(input?.jid ?? null);
-  return {
-    jid: input?.jid ?? "",
-    name: input?.name ?? derivedPhone ?? input?.jid ?? "Unknown",
-    phone: derivedPhone,
-    status: input?.status ?? null,
-    avatar_url: input?.avatar_url ?? null,
-    is_business: Boolean(input?.is_business),
-    is_registered: input?.is_registered ?? true,
-  };
-}
-
-function normalizeBootstrap(input: Partial<BootstrapResponse> | null | undefined): BootstrapResponse {
-  return {
-    qr_code: input?.qr_code ?? null,
-    is_connected: Boolean(input?.is_connected),
-    is_syncing: Boolean(input?.is_syncing),
-    chats: Array.isArray(input?.chats) ? input!.chats.map(normalizeChat) : [],
-    contacts: Array.isArray(input?.contacts) ? input!.contacts.map(normalizeContact) : [],
-    logout_hint: input?.logout_hint ?? null,
-  };
-}
-
-function SendIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="24" height="24" className="fill-current">
-      <path d="M1.101 21.757 23.8 12.028 1.101 2.3l.011 7.912 13.239 1.816-13.239 1.817-.011 7.912z" />
-    </svg>
-  );
-}
-
-function SearchIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="20" height="20" className="fill-current">
-      <path d="M15.009 13.805h-.636l-.22-.219a5.184 5.184 0 0 0 1.256-3.386 5.207 5.207 0 1 0-5.207 5.208 5.183 5.183 0 0 0 3.385-1.255l.221.22v.635l4.004 3.999 1.194-1.195-3.997-4.007zm-4.808 0a3.6 3.6 0 1 1 0-7.2 3.6 3.6 0 0 1 0 7.2z" />
-    </svg>
-  );
-}
-
-function NewChatIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="24" height="24" className="fill-current">
-      <path d="M19.005 3.175H4.674C3.642 3.175 3 3.789 3 4.821V21.02l3.544-3.514h12.461c1.033 0 2.064-1.06 2.064-2.093V4.821c-.001-1.032-1.032-1.646-2.064-1.646zm-4.989 9.869H7.041V11.1h6.975v1.944zm3-4H7.041V7.1h9.975v1.944z" />
-    </svg>
-  );
-}
-
-function PeopleIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="22" height="22" className="fill-current">
-      <path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5s-3 1.34-3 3 1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5C15 14.17 10.33 13 8 13zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.98 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z" />
-    </svg>
-  );
-}
-
-function LogoutIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="22" height="22" className="fill-current">
-      <path d="M13 3v2h4v14h-4v2h6V3h-6zm-1 4-1.41 1.41L12.17 10H3v2h9.17l-1.58 1.59L12 15l4-4-4-4z" />
-    </svg>
-  );
-}
-
-function WhatsAppLogo() {
-  return (
-    <svg xmlns="http://www.w3.org/2000/svg" width="39" height="39" viewBox="0 0 39 39">
-      <path
-        fill="#00E676"
-        d="M10.7 32.8l.6.3c2.5 1.5 5.3 2.2 8.1 2.2 8.8 0 16-7.2 16-16 0-4.2-1.7-8.3-4.7-11.3s-7-4.7-11.3-4.7c-8.8 0-16 7.2-15.9 16.1 0 3 .9 5.9 2.4 8.4l.4.6-1.6 5.9 6-1.5z"
-      />
-      <path
-        fill="#fff"
-        d="M32.4 6.4C29 2.9 24.3 1 19.5 1 9.3 1 1.1 9.3 1.2 19.4c0 3.2.9 6.3 2.4 9.1L1 38l9.7-2.5c2.7 1.5 5.7 2.2 8.7 2.2 10.1 0 18.3-8.3 18.3-18.4 0-4.9-1.9-9.5-5.3-12.9zM19.5 34.6c-2.7 0-5.4-.7-7.7-2.1l-.6-.3-5.8 1.5L6.9 28l-.4-.6c-4.4-7.1-2.3-16.5 4.9-20.9s16.5-2.3 20.9 4.9 2.3 16.5-4.9 20.9c-2.3 1.5-5.1 2.3-7.9 2.3zm8.8-11.1l-1.1-.5s-1.6-.7-2.6-1.2c-.1 0-.2-.1-.3-.1-.3 0-.5.1-.7.2 0 0-.1.1-1.5 1.7-.1.2-.3.3-.5.3h-.1c-.1 0-.3-.1-.4-.2l-.5-.2c-1.1-.5-2.1-1.1-2.9-1.9-.2-.2-.5-.4-.7-.6-.7-.7-1.4-1.5-1.9-2.4l-.1-.2c-.1-.1-.1-.2-.2-.4 0-.2 0-.4.1-.5 0 0 .4-.5.7-.8.2-.2.3-.5.5-.7.2-.3.3-.7.2-1-.1-.5-1.3-3.2-1.6-3.8-.2-.3-.4-.4-.7-.5h-1.1c-.2 0-.4.1-.6.1l-.1.1c-.2.1-.4.3-.6.4-.2.2-.3.4-.5.6-.7.9-1.1 2-1.1 3.1 0 .8.2 1.6.5 2.3l.1.3c.9 1.9 2.1 3.6 3.7 5.1l.4.4c.3.3.6.5.8.8 2.1 1.8 4.5 3.1 7.2 3.8.3.1.7.1 1 .2h1c.5 0 1.1-.2 1.5-.4.3-.2.5-.2.7-.4l.2-.2c.2-.2.4-.3.6-.5s.3-.4.5-.6c.2-.4.3-.9.4-1.4v-.7s-.1-.1-.3-.2z"
-      />
-    </svg>
-  );
-}
-
-function clsx(...values: Array<string | false | null | undefined>) {
-  return values.filter(Boolean).join(" ");
-}
-
-function formatTime(timestampMs: number | null) {
-  if (!timestampMs) return "";
-  return new Date(timestampMs).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function initials(name: string) {
-  return (
-    name
-      .split(" ")
-      .filter(Boolean)
-      .slice(0, 2)
-      .map((part) => part[0]?.toUpperCase() ?? "")
-      .join("") || "WA"
-  );
-}
-
-function phoneFromJid(jid: string | null) {
-  if (!jid) return null;
-  if (jid.endsWith("@s.whatsapp.net")) return jid.split("@")[0];
-  return null;
-}
-
-function displayName(name: string | null | undefined, jid: string, phone?: string | null) {
-  const trimmed = name?.trim();
-  if (trimmed && trimmed !== jid) return trimmed;
-  const fallbackPhone = phone ?? phoneFromJid(jid);
-  if (fallbackPhone) return `+${fallbackPhone}`;
-  return trimmed || jid;
-}
-
-function makeManualChat(phone: string): ApiChat {
-  return {
-    jid: `${phone}@s.whatsapp.net`,
-    name: `+${phone}`,
-    phone,
-    is_group: false,
-    preview: null,
-    timestamp_ms: null,
-    unread_count: 0,
-    archived: false,
-    muted: false,
-    avatar_url: null,
-    status: null,
-    typing: null,
-    is_online: false,
-    last_seen_ms: null,
-  };
-}
-
-function formatFileSize(bytes: number | null) {
-  if (!bytes) return null;
-  const units = ["B", "KB", "MB", "GB"];
-  let value = bytes;
-  let unitIndex = 0;
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-  return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
-}
-
-function fileExtension(fileName: string | null | undefined, mimeType: string | null | undefined) {
-  const fromName = fileName?.split(".").pop()?.trim();
-  if (fromName) return fromName.slice(0, 6).toUpperCase();
-
-  const subtype = mimeType?.split("/")[1]?.split(";")[0]?.trim();
-  if (!subtype) return "FILE";
-  if (subtype === "pdf") return "PDF";
-  return subtype.replace(/[^a-z0-9]/gi, "").slice(0, 6).toUpperCase() || "FILE";
-}
-
-function documentMeta(media: NonNullable<ApiMessage["media"]>) {
-  const items = [formatFileSize(media.file_length)];
-  if (media.page_count) items.push(`${media.page_count} page${media.page_count > 1 ? "s" : ""}`);
-  if (!media.page_count && media.mime_type) {
-    const subtype = media.mime_type.split("/")[1]?.split(";")[0]?.replace(/[.+_-]/g, " ");
-    if (subtype) items.push(subtype.toUpperCase());
-  }
-  return items.filter(Boolean).join(" • ");
-}
-
-function formatPresence(chat: ApiChat) {
-  const phoneLabel = !chat.is_group && chat.phone ? `+${chat.phone}` : null;
-
-  if (chat.typing) {
-    return phoneLabel ? `${chat.typing} · ${phoneLabel}` : chat.typing;
-  }
-  if (chat.is_online) {
-    return phoneLabel ? `online · ${phoneLabel}` : "online";
-  }
-  if (chat.last_seen_ms) {
-    const lastSeen = `last seen ${new Date(chat.last_seen_ms).toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-    })}`;
-    return phoneLabel ? `${lastSeen} · ${phoneLabel}` : lastSeen;
-  }
-
-  if (chat.status && phoneLabel) {
-    return `${chat.status} · ${phoneLabel}`;
-  }
-
-  return chat.status ?? (chat.is_group ? "Synced group" : phoneLabel ?? displayName(chat.name, chat.jid, chat.phone));
-}
-
-function getReceiptIcon(status: string | null) {
-  if (!status) return "";
-  if (status === "played") return "▶▶";
-  if (status === "read") return "✓✓";
-  if (status === "delivered") return "✓✓";
-  return "✓";
-}
-
-function getReceiptColor(status: string | null) {
-  if (status === "read" || status === "played") return "text-sky-500";
-  return "text-wa-text-secondary";
-}
-
-function mentionTokenFromJid(jid: string) {
-  return jid.split("@")[0]?.split(":")[0] ?? jid;
-}
-
-function mentionLabel(name: string) {
-  return `@${name.replace(/^\+/, "")}`;
-}
-
-function shouldRenderMessageText(message: ApiMessage) {
-  const text = (message.text || message.media?.caption || "").trim();
-  if (!text) return false;
-  if (text === "Sticker" || text === "<non-text>") return false;
-  if (message.media?.kind === "document") {
-    const fileName = message.media.file_name?.trim();
-    const title = message.media.title?.trim();
-    if (text === fileName || text === title) return false;
-  }
-  return true;
-}
-
-function renderTextWithMentions(message: ApiMessage) {
-  const text = message.text || message.media?.caption || "";
-  const mentions = Array.isArray(message.mentions) ? message.mentions : [];
-  if (!mentions.length) return text;
-
-  let output = text;
-  for (const mention of mentions) {
-    const mentionToken = mentionTokenFromJid(mention.jid);
-    const label = mentionLabel(mention.name);
-    output = output.replaceAll(`@${mentionToken}`, label);
-
-    const phone = phoneFromJid(mention.jid);
-    if (phone) output = output.replaceAll(`@${phone}`, label);
-  }
-  return output;
-}
-
-function MessageMedia({ message }: { message: ApiMessage }) {
-  if (!message.media?.download_path) return null;
-
-  const media = message.media;
-  const downloadPath = media.download_path!;
-
-  if (media.kind === "image" || media.kind === "sticker") {
-    return (
-      <img
-        src={downloadPath}
-        alt={media.caption ?? media.file_name ?? media.kind}
-        className={clsx(
-          "mb-2 max-h-72 rounded-2xl object-contain",
-          media.kind === "sticker" && "max-h-40 bg-transparent",
-        )}
-      />
-    );
-  }
-
-  if (media.kind === "video") {
-    return (
-      <video
-        src={downloadPath}
-        controls
-        playsInline
-        className="mb-2 max-h-80 rounded-2xl bg-black"
-      />
-    );
-  }
-
-  if (media.kind === "audio") {
-    return <audio src={downloadPath} controls className="mb-2 w-full max-w-xs" />;
-  }
-
-  const fileName = media.file_name ?? media.title ?? "Document";
-  const extension = fileExtension(media.file_name, media.mime_type);
-  const meta = documentMeta(media);
-
-  return (
-    <a
-      href={downloadPath}
-      target="_blank"
-      rel="noreferrer"
-      className="mb-2 block w-[320px] max-w-full overflow-hidden rounded-2xl bg-[#f0f2f5] text-sm text-wa-text shadow-sm ring-1 ring-black/5 transition hover:bg-[#e8ecef]"
-    >
-      <div className="relative h-40 bg-[#dfe5e7]">
-        {media.preview_image_url ? (
-          <img
-            src={media.preview_image_url}
-            alt={fileName}
-            className="h-full w-full object-cover"
-          />
-        ) : (
-          <div className="flex h-full items-center justify-center bg-gradient-to-br from-[#dde4e6] to-[#c9d3d8] px-4 text-center">
-            <div>
-              <div className="text-4xl font-semibold tracking-tight text-[#41525d]">{extension}</div>
-              <div className="mt-2 text-xs font-medium uppercase tracking-[0.2em] text-[#667781]">
-                {media.page_count ? `${media.page_count} page${media.page_count > 1 ? "s" : ""}` : "Document preview"}
-              </div>
-            </div>
-          </div>
-        )}
-        <div className="absolute left-3 top-3 rounded-lg bg-white/90 px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-[#111b21] shadow-sm">
-          {extension}
-        </div>
-        <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/60 via-black/20 to-transparent px-3 py-3">
-          <div className="truncate text-sm font-medium text-white">{fileName}</div>
-          {media.title && media.title !== fileName ? (
-            <div className="truncate text-xs text-white/80">{media.title}</div>
-          ) : null}
-        </div>
-      </div>
-
-      <div className="flex items-center gap-3 px-3 py-3">
-        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-white text-xs font-semibold uppercase tracking-wide text-[#54656f] shadow-sm">
-          {extension}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="truncate font-medium text-wa-text">{fileName}</div>
-          <div className="truncate text-xs text-wa-text-secondary">{meta || "Tap to open"}</div>
-        </div>
-        <div className="shrink-0 text-xs font-semibold text-wa-teal">Open</div>
-      </div>
-    </a>
-  );
-}
+import type {
+  ApiChat,
+  ApiMessage,
+  BootstrapResponse,
+  SidebarView,
+} from "./lib/types";
+import { normalizeBootstrap, normalizeMessage } from "./lib/normalizers";
+import {
+  clsx,
+  displayName,
+  formatPresence,
+  formatTime,
+  getReceiptColor,
+  getReceiptIcon,
+  initials,
+  makeManualChat,
+  phoneFromJid,
+  renderTextWithMentions,
+  shouldRenderMessageText,
+} from "./lib/helpers";
+import {
+  LogoutIcon,
+  NewChatIcon,
+  PeopleIcon,
+  SearchIcon,
+  SendIcon,
+  WhatsAppLogo,
+} from "./components/Icons";
+import { MessageMedia } from "./components/MessageMedia";
 
 export default function Home() {
   const [bootstrap, setBootstrap] = useState<BootstrapResponse | null>(null);
@@ -753,6 +335,8 @@ export default function Home() {
     [activeChat, extractMentions, messageText, refresh],
   );
 
+  // ── Loading state ──────────────────────────────────────────────────────
+
   if (isLoading) {
     return (
       <div className="flex h-screen items-center justify-center bg-wa-bg">
@@ -766,6 +350,8 @@ export default function Home() {
       </div>
     );
   }
+
+  // ── QR pairing screen ──────────────────────────────────────────────────
 
   if (!isConnected) {
     return (
@@ -802,9 +388,12 @@ export default function Home() {
     );
   }
 
+  // ── Main chat interface ────────────────────────────────────────────────
+
   return (
     <div className="flex h-screen bg-wa-bg">
       <div className="flex h-full w-full overflow-hidden shadow-2xl">
+        {/* Navigation rail */}
         <aside className="flex w-[72px] flex-col items-center justify-between border-r border-[#202c33] bg-[#202c33] py-4 text-white">
           <button
             className={clsx(
@@ -839,6 +428,7 @@ export default function Home() {
           </div>
         </aside>
 
+        {/* Sidebar */}
         <section className="flex w-[390px] flex-col border-r border-wa-border bg-white">
           <div className="border-b border-wa-border bg-[#f0f2f5] px-4 py-3">
             <div className="flex items-center justify-between gap-3">
@@ -1013,6 +603,7 @@ export default function Home() {
           </div>
         </section>
 
+        {/* Chat area */}
         <main className="flex flex-1 flex-col bg-[#efeae2]">
           {activeChat ? (
             <>
