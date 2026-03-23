@@ -180,16 +180,18 @@ for the first time (see [SKDM Warm-up](#skdm-warm-up)).
 
 | Struct | Purpose |
 |--------|---------|
-| `DataStore` | Top-level in-memory store: `HashMap<String, ChatRecord>` for chats, `HashMap<String, ContactSummary>` for contacts, `HashMap<String, MediaBlob>` for downloadable media |
+| `DataStore` | Top-level in-memory store: `HashMap<String, ChatRecord>` for chats, `HashMap<String, ContactSummary>` for contacts, `HashMap<String, MediaBlob>` for downloadable media, `HashMap<String, String>` for push-name cache, `HashMap<String, String>` for user-defined aliases |
 | `ChatRecord` | Container holding a `ChatSummary` + `Vec<ChatMessage>` |
 | `ChatSummary` | Sidebar-level metadata: JID, name, phone, preview, unread count, typing indicator, presence |
 | `ChatMessage` | Single message: id, sender, text, timestamp, media attachment, mentions, receipt status |
 | `ContactSummary` | Contact entry: JID, name, phone, status, avatar URL, business/registered flags |
 | `MediaAttachment` | Serializable media metadata sent to the frontend (kind, MIME, dimensions, download path, preview) |
 | `MediaBlob` | Server-side download parameters (direct path, media key, SHA256 hashes, file length, media type) — never serialized to the client |
-| `MentionSummary` | Resolved mention: JID + display name |
+| `MentionSummary` | Resolved mention: JID + display name + phone |
 | `StickerRecord` | Received sticker entry: URL, MIME type, dimensions (for sticker picker) |
 | `StickersResponse` | DTO wrapping `Vec<StickerRecord>` for the `/api/stickers` endpoint |
+| `ContactAlias` | User-defined alias: phone number → display name |
+| `AliasListResponse` | DTO wrapping `Vec<ContactAlias>` for the `/api/contact-aliases` endpoint |
 
 **Constants:**
 
@@ -234,6 +236,9 @@ All endpoints are prefixed with `/api` and proxied from the frontend via Next.js
 | `POST` | `/api/messages/send-media` | `send_media` | Sends media (sticker/GIF/image) by URL | ✅ `client.upload()` + `send_message()` |
 | `GET` | `/api/media/:chat_jid/:message_id` | `get_media` | Downloads + proxies media from WhatsApp servers | ✅ `client.download_from_params()` |
 | `GET` | `/api/stickers` | `get_stickers` | Returns recently received stickers from the store | — |
+| `GET` | `/api/contact-aliases` | `get_aliases` | Returns all user-defined contact aliases | — |
+| `PUT` | `/api/contact-aliases/:phone` | `set_alias` | Creates/updates alias for a phone number | — |
+| `DELETE` | `/api/contact-aliases/:phone` | `delete_alias` | Removes alias for a phone number | — |
 
 #### Send Message Flow
 
@@ -374,6 +379,33 @@ WhatsApp's dual JID system (phone-based `@s.whatsapp.net` and Linked Identity `@
 | `wait_for_startup_sync` | Blocks until WhatsApp's initial sync completes (max 45s), then refreshes all contacts |
 | `ensure_presence_subscription` | Subscribes to presence updates for non-group JIDs |
 
+### Contact Aliases
+
+The WhatsApp protocol only provides push names for contacts who have sent messages in
+the current session. For other contacts, only phone numbers are available.  To work
+around this, the app provides a **local alias system** that lets users assign friendly
+display names to phone numbers.
+
+**Persistence:** Aliases are stored in `contact_aliases.json` (same directory as the
+binary) and loaded on startup. Changes are written to disk immediately.
+
+**Name resolution priority** (highest to lowest):
+
+1. **User-defined alias** — `DataStore.aliases` (phone → name)
+2. **Push name** — `DataStore.push_names` (JID → name, from `PushNameUpdate` events)
+3. **Contact name** — `DataStore.contacts` (from `refresh_contact_profile`)
+4. **Chat name** — `DataStore.chats` summary name
+5. **Phone number** — formatted as `+<phone>`
+6. **JID string** — raw JID as last resort
+
+Aliases are checked in:
+- `display_name_for_jid()` — resolves JID to phone, checks aliases
+- `find_display_name_by_phone()` — checks aliases first
+- `alias_for_jid()` — dedicated lookup by JID (via phone hint, contact, chat, or JID phone)
+- `resolve_mention_summaries()` — checks alias before multi-step resolution
+- `get_chat_messages()` — re-resolves mention names with alias priority
+- Frontend `mentionNameByJid` / `mentionNameByToken` maps — aliases applied first
+
 ---
 
 ## Frontend Architecture
@@ -384,7 +416,7 @@ WhatsApp's dual JID system (phone-based `@s.whatsapp.net` and Linked Identity `@
 app/
 ├── page.tsx                Main Home component (state, effects, render)
 ├── lib/
-│   ├── types.ts            Shared interfaces (ApiMessage, ApiChat, ApiContact, BootstrapResponse)
+│   ├── types.ts            Shared interfaces (ApiMessage, ApiChat, ApiContact, ContactAlias, BootstrapResponse)
 │   ├── helpers.ts          ~30 pure utility functions
 │   ├── normalizers.ts      Defensive normalizers for API responses
 │   └── emoji-data.ts       Comprehensive emoji dataset (8 categories, ~1800 entries)
@@ -394,7 +426,8 @@ app/
     ├── EmojiPicker.tsx      WhatsApp-style emoji picker (search, categories, skin tones)
     ├── GifPicker.tsx        Tenor API v2 GIF search with category tiles
     ├── StickerPicker.tsx    Grid of stickers collected from received messages
-    └── MediaPicker.tsx      Tabbed container switching between Emoji/GIF/Sticker pickers
+    ├── MediaPicker.tsx      Tabbed container switching between Emoji/GIF/Sticker pickers
+    └── AliasEditor.tsx      Modal for managing contact aliases (add/edit/delete)
 ```
 
 **Import dependency graph:**
@@ -410,7 +443,7 @@ EmojiPicker.tsx   ← emoji-data
 GifPicker.tsx     ← (standalone, uses Tenor API)
 StickerPicker.tsx ← (standalone, fetches /api/stickers)
 MediaPicker.tsx   ← EmojiPicker, GifPicker, StickerPicker
-page.tsx          ← types, helpers, normalizers, Icons, MessageMedia, MediaPicker
+page.tsx          ← types, helpers, normalizers, Icons, MessageMedia, MediaPicker, AliasEditor
 ```
 
 ### Component Tree

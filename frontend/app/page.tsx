@@ -11,9 +11,11 @@ import {
 import QRCode from "react-qr-code";
 
 import type {
+  AliasListResponse,
   ApiChat,
   ApiMessage,
   BootstrapResponse,
+  ContactAlias,
   SidebarView,
 } from "./lib/types";
 import { normalizeBootstrap, normalizeMessage } from "./lib/normalizers";
@@ -26,6 +28,7 @@ import {
   getReceiptIcon,
   initials,
   makeManualChat,
+  mentionTokenFromJid,
   phoneFromJid,
   renderTextWithMentions,
   shouldRenderMessageText,
@@ -41,6 +44,7 @@ import {
 import { MessageMedia } from "./components/MessageMedia";
 import { MediaPicker, type PickerTab } from "./components/MediaPicker";
 import type { StickerInfo } from "./components/StickerPicker";
+import { AliasEditor } from "./components/AliasEditor";
 
 export default function Home() {
   const [bootstrap, setBootstrap] = useState<BootstrapResponse | null>(null);
@@ -57,6 +61,8 @@ export default function Home() {
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [picker, setPicker] = useState<PickerTab | null>(null);
   const [stickers, setStickers] = useState<StickerInfo[]>([]);
+  const [aliases, setAliases] = useState<ContactAlias[]>([]);
+  const [showAliasEditor, setShowAliasEditor] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<number | null>(null);
 
@@ -90,6 +96,58 @@ export default function Home() {
     }
     return map;
   }, [chats, contacts]);
+
+  // Build a phone→alias lookup from the aliases list (highest priority)
+  const aliasMap = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const a of aliases) map.set(a.phone, a.name);
+    return map;
+  }, [aliases]);
+
+  const mentionNameByJid = useMemo(() => {
+    const map = new Map<string, string>();
+
+    for (const contact of contacts) {
+      // Check alias first
+      const alias = contact.phone ? aliasMap.get(contact.phone) : undefined;
+      const name = alias ?? displayName(contact.name, contact.jid, contact.phone);
+      map.set(contact.jid, name);
+      if (contact.phone) map.set(`${contact.phone}@s.whatsapp.net`, name);
+    }
+
+    for (const chat of chats) {
+      const alias = chat.phone ? aliasMap.get(chat.phone) : undefined;
+      const name = alias ?? displayName(chat.name, chat.jid, chat.phone);
+      if (!map.has(chat.jid)) map.set(chat.jid, name);
+      if (chat.phone && !map.has(`${chat.phone}@s.whatsapp.net`)) {
+        map.set(`${chat.phone}@s.whatsapp.net`, name);
+      }
+    }
+
+    return map;
+  }, [chats, contacts, aliasMap]);
+
+  const mentionNameByToken = useMemo(() => {
+    const map = new Map<string, string>();
+
+    const register = (jid: string, phone: string | null | undefined, rawName: string | null | undefined) => {
+      const alias = phone ? aliasMap.get(phone) : undefined;
+      const name = alias ?? displayName(rawName, jid, phone);
+      const jidToken = mentionTokenFromJid(jid)?.toLowerCase();
+      if (jidToken) map.set(jidToken, name);
+      if (phone) map.set(phone.toLowerCase(), name);
+    };
+
+    for (const contact of contacts) {
+      register(contact.jid, contact.phone, contact.name);
+    }
+
+    for (const chat of chats) {
+      register(chat.jid, chat.phone, chat.name);
+    }
+
+    return map;
+  }, [chats, contacts, aliasMap]);
 
   const extractMentions = useCallback(
     (text: string) => {
@@ -155,6 +213,18 @@ export default function Home() {
     }
   }, []);
 
+  const fetchAliases = useCallback(async () => {
+    try {
+      const res = await fetch("/api/contact-aliases", { cache: "no-store" });
+      if (res.ok) {
+        const data = (await res.json()) as AliasListResponse;
+        setAliases(data.aliases ?? []);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
   const refresh = useCallback(
     async (preferredChatId?: string | null) => {
       try {
@@ -162,6 +232,9 @@ export default function Home() {
         if (!res.ok) return;
         const data = normalizeBootstrap((await res.json()) as Partial<BootstrapResponse>);
         setBootstrap(data);
+
+        // Fetch aliases in parallel with the rest
+        void fetchAliases();
 
         const map = new Map<string, ApiChat>();
         for (const chat of data.chats) map.set(chat.jid, chat);
@@ -186,7 +259,7 @@ export default function Home() {
         setIsLoading(false);
       }
     },
-    [activeChatId, loadMessages, manualChats],
+    [activeChatId, loadMessages, manualChats, fetchAliases],
   );
 
   useEffect(() => {
@@ -517,6 +590,17 @@ export default function Home() {
               <PeopleIcon />
             </button>
             <button
+              className={clsx(
+                "flex h-12 w-12 items-center justify-center rounded-2xl transition-colors",
+                showAliasEditor ? "bg-white/10 text-white" : "text-white/70 hover:bg-white/10",
+              )}
+              onClick={() => setShowAliasEditor((v) => !v)}
+              aria-label="Contact Aliases"
+              title="Contact Aliases"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" /></svg>
+            </button>
+            <button
               data-testid="logout-button"
               className="flex h-12 w-12 items-center justify-center rounded-2xl text-white/70 transition-colors hover:bg-red-500/20 hover:text-red-200"
               onClick={() => void handleLogout()}
@@ -622,7 +706,8 @@ export default function Home() {
               ) : (
                 filteredChats.map((chat) => (
                   (() => {
-                    const shownName = displayName(chat.name, chat.jid, chat.phone);
+                    const chatAlias = chat.phone ? aliasMap.get(chat.phone) : undefined;
+                    const shownName = chatAlias ?? displayName(chat.name, chat.jid, chat.phone);
                     return (
                   <button
                     key={chat.jid}
@@ -668,7 +753,8 @@ export default function Home() {
             ) : (
               filteredContacts.map((contact) => (
                 (() => {
-                  const shownName = displayName(contact.name, contact.jid, contact.phone);
+                  const contactAlias = contact.phone ? aliasMap.get(contact.phone) : undefined;
+                  const shownName = contactAlias ?? displayName(contact.name, contact.jid, contact.phone);
                   return (
                 <button
                   key={contact.jid}
@@ -708,7 +794,8 @@ export default function Home() {
           {activeChat ? (
             <>
               {(() => {
-                const shownName = displayName(activeChat.name, activeChat.jid, activeChat.phone);
+                const activeChatAlias = activeChat.phone ? aliasMap.get(activeChat.phone) : undefined;
+                const shownName = activeChatAlias ?? displayName(activeChat.name, activeChat.jid, activeChat.phone);
                 return (
               <header className="flex h-[60px] items-center justify-between border-b border-wa-border bg-[#f0f2f5] px-4">
                 <div className="flex items-center gap-3">
@@ -760,12 +847,17 @@ export default function Home() {
                       >
                         {!message.from_me && message.sender_name ? (
                           <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-wa-teal-dark">
-                            {message.sender_name}
+                            {(() => {
+                              // Check alias for sender
+                              const senderPhone = phoneFromJid(message.sender_jid);
+                              const alias = senderPhone ? aliasMap.get(senderPhone) : undefined;
+                              return alias ?? mentionNameByJid.get(message.sender_jid) ?? message.sender_name;
+                            })()}
                           </p>
                         ) : null}
                         <MessageMedia message={message} />
                         {shouldRenderMessageText(message) ? (
-                          <p className="whitespace-pre-wrap text-sm text-wa-text">{renderTextWithMentions(message)}</p>
+                          <p className="whitespace-pre-wrap text-sm text-wa-text">{renderTextWithMentions(message, mentionNameByJid, mentionNameByToken, aliasMap)}</p>
                         ) : null}
                         <div className="mt-1 flex items-center justify-end gap-1 text-right text-[11px] text-wa-text-secondary">
                           <span>{formatTime(message.timestamp_ms)}</span>
@@ -859,6 +951,17 @@ export default function Home() {
           )}
         </main>
       </div>
+
+      {/* Alias Editor Modal */}
+      {showAliasEditor && (
+        <AliasEditor
+          aliases={aliases}
+          contacts={contacts}
+          chats={chats}
+          onClose={() => setShowAliasEditor(false)}
+          onAliasesChanged={() => void fetchAliases()}
+        />
+      )}
     </div>
   );
 }

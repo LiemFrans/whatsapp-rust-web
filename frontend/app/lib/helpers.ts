@@ -135,6 +135,46 @@ export function mentionLabel(name: string) {
   return `@${name.replace(/^\+/, "")}`;
 }
 
+export function resolveMentionName(
+  mention: ApiMessage["mentions"][number],
+  mentionNameByJid?: ReadonlyMap<string, string>,
+  mentionNameByPhone?: ReadonlyMap<string, string>,
+  aliasMap?: ReadonlyMap<string, string>,
+) {
+  // 0. Check alias by phone (highest priority)
+  if (mention.phone && aliasMap?.size) {
+    const alias = aliasMap.get(mention.phone);
+    if (alias) return alias;
+  }
+  // Also try phone from JID
+  const jidPhone = phoneFromJid(mention.jid);
+  if (jidPhone && aliasMap?.size) {
+    const alias = aliasMap.get(jidPhone);
+    if (alias) return alias;
+  }
+  // 1. Try by JID
+  const byJid = mentionNameByJid?.get(mention.jid)?.trim();
+  if (byJid) {
+    const fallbackPhone = jidPhone ?? mention.phone ?? null;
+    const resolved = displayName(byJid, mention.jid, fallbackPhone);
+    if (resolved !== mention.jid && !resolved.startsWith("+")) return resolved;
+  }
+  // 2. Try by phone
+  if (mention.phone) {
+    const byPhone = mentionNameByPhone?.get(mention.phone)?.trim();
+    if (byPhone && !byPhone.startsWith("+")) return byPhone;
+  }
+  // 3. Try phone-based JID in the JID map
+  if (mention.phone) {
+    const phoneJid = `${mention.phone}@s.whatsapp.net`;
+    const byPhoneJid = mentionNameByJid?.get(phoneJid)?.trim();
+    if (byPhoneJid && !byPhoneJid.startsWith("+")) return byPhoneJid;
+  }
+  // 4. Fallback
+  const fallbackPhone = jidPhone ?? mention.phone ?? null;
+  return displayName(mention.name, mention.jid, fallbackPhone);
+}
+
 export function shouldRenderMessageText(message: ApiMessage) {
   const text = (message.text || message.media?.caption || "").trim();
   if (!text) return false;
@@ -147,19 +187,35 @@ export function shouldRenderMessageText(message: ApiMessage) {
   return true;
 }
 
-export function renderTextWithMentions(message: ApiMessage) {
+export function renderTextWithMentions(
+  message: ApiMessage,
+  mentionNameByJid?: ReadonlyMap<string, string>,
+  mentionNameByToken?: ReadonlyMap<string, string>,
+  aliasMap?: ReadonlyMap<string, string>,
+) {
   const text = message.text || message.media?.caption || "";
   const mentions = Array.isArray(message.mentions) ? message.mentions : [];
-  if (!mentions.length) return text;
-
   let output = text;
+
   for (const mention of mentions) {
     const token = mentionTokenFromJid(mention.jid);
-    const label = mentionLabel(mention.name);
+    const label = mentionLabel(resolveMentionName(mention, mentionNameByJid, mentionNameByToken, aliasMap));
+    // Replace by JID token (e.g. LID number)
     output = output.replaceAll(`@${token}`, label);
-
+    // Replace by phone token
+    if (mention.phone) output = output.replaceAll(`@${mention.phone}`, label);
+    // Replace by phone extracted from JID (if phone-based JID)
     const phone = phoneFromJid(mention.jid);
     if (phone) output = output.replaceAll(`@${phone}`, label);
   }
+
+  // Fallback: replace any remaining @<token> using contacts/chats data
+  if (mentionNameByToken?.size) {
+    output = output.replace(/@([0-9A-Za-z._-]{5,})/g, (full, token: string) => {
+      const resolved = mentionNameByToken.get(token.toLowerCase());
+      return resolved ? mentionLabel(resolved) : full;
+    });
+  }
+
   return output;
 }

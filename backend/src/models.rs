@@ -53,6 +53,10 @@ impl AppState {
 pub struct MentionSummary {
     pub jid: String,
     pub name: String,
+    /// Resolved phone number (E.164 without '+'); allows the frontend to
+    /// replace both `@<lid_token>` and `@<phone>` in the message text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phone: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -150,6 +154,14 @@ pub struct DataStore {
     pub contacts: HashMap<String, ContactSummary>,
     pub media: HashMap<String, MediaBlob>,
     pub stickers: Vec<StickerRecord>,
+    /// Push-name cache: maps JID → push name.  Populated from
+    /// `PushNameUpdate` events and incoming message `push_name` fields.
+    /// Used as a fallback when resolving mention display names.
+    pub push_names: HashMap<String, String>,
+    /// User-defined contact aliases: maps phone number (E.164 without '+')
+    /// → display name (e.g. "6285111240397" → "Cici").  Highest priority
+    /// in name resolution — persisted to a JSON file on disk.
+    pub aliases: HashMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -238,4 +250,24 @@ pub struct SendMediaRequest {
     pub caption: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
+}
+
+// ---------------------------------------------------------------------------
+// Contact alias DTOs
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContactAlias {
+    pub phone: String,
+    pub name: String,
+}
+
+#[derive(Serialize)]
+pub struct AliasListResponse {
+    pub aliases: Vec<ContactAlias>,
+}
+
+#[derive(Deserialize)]
+pub struct SetAliasRequest {
+    pub name: String,
 }

@@ -94,7 +94,7 @@ pub async fn get_chat_messages(
     State(state): State<AppState>,
 ) -> Result<Json<MessagesResponse>, (StatusCode, Json<ErrorResponse>)> {
     let store = state.store.read().await;
-    let messages = store.messages_for(&chat_jid).ok_or_else(|| {
+    let mut messages = store.messages_for(&chat_jid).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -102,6 +102,41 @@ pub async fn get_chat_messages(
             }),
         )
     })?;
+
+    // Re-resolve mention names using the latest contact/push-name/alias data.
+    // At message-arrival time the store may not yet have all contacts, but
+    // by the time the frontend polls the names are usually available.
+    for msg in &mut messages {
+        for mention in &mut msg.mentions {
+            // Check alias first (highest priority)
+            if let Some(alias) = store.alias_for_jid(&mention.jid, mention.phone.as_deref()) {
+                mention.name = alias;
+                continue;
+            }
+            if looks_like_fallback_name(&mention.name, &mention.jid, mention.phone.as_deref()) {
+                // Try finding a better name from the store
+                if let Some(ref phone) = mention.phone {
+                    if let Some(found) = store.find_display_name_by_phone(phone) {
+                        mention.name = found;
+                        continue;
+                    }
+                }
+                // Try push_names cache by JID
+                if let Some(push) = store.push_names.get(&mention.jid) {
+                    if !looks_like_fallback_name(push, &mention.jid, mention.phone.as_deref()) {
+                        mention.name = push.clone();
+                        continue;
+                    }
+                }
+                // Try direct JID lookup
+                let direct = store.display_name_for_jid(&mention.jid);
+                if !looks_like_fallback_name(&direct, &mention.jid, mention.phone.as_deref()) {
+                    mention.name = direct;
+                }
+            }
+        }
+    }
+
     Ok(Json(MessagesResponse { messages }))
 }
 
@@ -856,5 +891,64 @@ pub async fn send_media(
                 }),
             ))
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Contact aliases
+// ---------------------------------------------------------------------------
+
+pub async fn get_aliases(State(state): State<AppState>) -> Json<AliasListResponse> {
+    let store = state.store.read().await;
+    Json(AliasListResponse {
+        aliases: store.list_aliases(),
+    })
+}
+
+pub async fn set_alias(
+    Path(phone): Path<String>,
+    State(state): State<AppState>,
+    Json(payload): Json<SetAliasRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let phone = normalize_phone(&phone);
+    if phone.is_empty() || !phone.chars().all(|c| c.is_ascii_digit()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Phone must contain only digits (E.164 without '+').".into(),
+            }),
+        ));
+    }
+    let name = payload.name.trim().to_string();
+    if name.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "\"name\" must not be empty".into(),
+            }),
+        ));
+    }
+    log::info!("Setting alias: {phone} → {name}");
+    let mut store = state.store.write().await;
+    store.set_alias(phone.clone(), name.clone());
+    Ok(Json(serde_json::json!({ "success": true, "phone": phone, "name": name })))
+}
+
+pub async fn delete_alias(
+    Path(phone): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let phone = normalize_phone(&phone);
+    let mut store = state.store.write().await;
+    if store.remove_alias(&phone) {
+        log::info!("Removed alias for {phone}");
+        Ok(Json(serde_json::json!({ "success": true })))
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("No alias found for {phone}"),
+            }),
+        ))
     }
 }

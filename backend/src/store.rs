@@ -1,9 +1,40 @@
-//! In-memory data store — manages chats, contacts, and media blobs.
+//! In-memory data store — manages chats, contacts, media blobs, and aliases.
 
 use crate::helpers::*;
 use crate::models::*;
 
+use std::collections::HashMap;
+use std::path::Path;
+
 const MAX_STICKERS: usize = 100;
+const ALIAS_FILE: &str = "contact_aliases.json";
+
+/// Load aliases from disk. Returns empty map on any error.
+pub fn load_aliases_from_disk() -> HashMap<String, String> {
+    let path = Path::new(ALIAS_FILE);
+    if !path.exists() {
+        return HashMap::new();
+    }
+    match std::fs::read_to_string(path) {
+        Ok(data) => serde_json::from_str::<HashMap<String, String>>(&data).unwrap_or_default(),
+        Err(e) => {
+            log::warn!("Failed to read {ALIAS_FILE}: {e}");
+            HashMap::new()
+        }
+    }
+}
+
+/// Persist current aliases to disk.
+pub fn save_aliases_to_disk(aliases: &HashMap<String, String>) {
+    match serde_json::to_string_pretty(aliases) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(ALIAS_FILE, json) {
+                log::error!("Failed to write {ALIAS_FILE}: {e}");
+            }
+        }
+        Err(e) => log::error!("Failed to serialize aliases: {e}"),
+    }
+}
 
 impl DataStore {
     pub fn reset(&mut self) {
@@ -11,6 +42,8 @@ impl DataStore {
         self.contacts.clear();
         self.media.clear();
         self.stickers.clear();
+        self.push_names.clear();
+        // NOTE: aliases are NOT cleared on reset — they persist across sessions.
     }
 
     pub fn record_sticker(&mut self, record: StickerRecord) {
@@ -56,6 +89,28 @@ impl DataStore {
     }
 
     pub fn display_name_for_jid(&self, jid: &str) -> String {
+        // 0. Check aliases by phone extracted from JID
+        if let Some(phone) = jid_phone_str(jid) {
+            if let Some(alias) = self.aliases.get(&phone) {
+                return alias.clone();
+            }
+        }
+        // Also check aliases by phone stored in contacts/chats
+        if let Some(contact) = self.contacts.get(jid) {
+            if let Some(ref phone) = contact.phone {
+                if let Some(alias) = self.aliases.get(phone) {
+                    return alias.clone();
+                }
+            }
+        }
+        if let Some(chat) = self.chats.get(jid) {
+            if let Some(ref phone) = chat.summary.phone {
+                if let Some(alias) = self.aliases.get(phone) {
+                    return alias.clone();
+                }
+            }
+        }
+
         if let Some(contact) = self.contacts.get(jid) {
             return contact.name.clone();
         }
@@ -66,6 +121,50 @@ impl DataStore {
             return format!("+{phone}");
         }
         jid.to_string()
+    }
+
+    /// Search all aliases, contacts, chats, and push-name cache for a real
+    /// display name matching the given phone number.  Returns `None` if no
+    /// match is found or if every match is just a fallback (phone/JID-based)
+    /// name.  Aliases always take highest priority.
+    pub fn find_display_name_by_phone(&self, phone: &str) -> Option<String> {
+        // 0. Check aliases (highest priority)
+        if let Some(alias) = self.aliases.get(phone) {
+            return Some(alias.clone());
+        }
+
+        // Search contacts first
+        for contact in self.contacts.values() {
+            if contact.phone.as_deref() == Some(phone) {
+                if !looks_like_fallback_name(&contact.name, &contact.jid, Some(phone)) {
+                    return Some(contact.name.clone());
+                }
+            }
+        }
+        // Then search chat summaries
+        for chat in self.chats.values() {
+            if chat.summary.phone.as_deref() == Some(phone) {
+                if !looks_like_fallback_name(&chat.summary.name, &chat.summary.jid, Some(phone)) {
+                    return Some(chat.summary.name.clone());
+                }
+            }
+        }
+        // Then search push-names cache (keyed by JID, but we match phone-based JID)
+        let phone_jid = format!("{phone}@s.whatsapp.net");
+        if let Some(push) = self.push_names.get(&phone_jid) {
+            if !looks_like_fallback_name(push, &phone_jid, Some(phone)) {
+                return Some(push.clone());
+            }
+        }
+        // Also search ALL push_names for any JID whose phone matches
+        for (jid, push) in &self.push_names {
+            if jid_phone_str(jid).as_deref() == Some(phone) {
+                if !looks_like_fallback_name(push, jid, Some(phone)) {
+                    return Some(push.clone());
+                }
+            }
+        }
+        None
     }
 
     pub fn ensure_chat(
@@ -129,6 +228,7 @@ impl DataStore {
 
     pub fn rename_contact(&mut self, jid: &str, new_name: &str) {
         if !new_name.trim().is_empty() {
+            self.push_names.insert(jid.to_string(), new_name.to_string());
             if let Some(contact) = self.contacts.get_mut(jid) {
                 contact.name = new_name.to_string();
             }
@@ -136,6 +236,67 @@ impl DataStore {
                 chat.summary.name = new_name.to_string();
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Alias management
+    // -----------------------------------------------------------------------
+
+    /// Look up alias for a JID by resolving its phone number from contacts,
+    /// chats, the JID itself, or a supplied phone number.
+    pub fn alias_for_jid(&self, jid: &str, phone_hint: Option<&str>) -> Option<String> {
+        // Try phone hint first
+        if let Some(phone) = phone_hint {
+            if let Some(alias) = self.aliases.get(phone) {
+                return Some(alias.clone());
+            }
+        }
+        // Try phone from contact
+        if let Some(contact) = self.contacts.get(jid) {
+            if let Some(ref phone) = contact.phone {
+                if let Some(alias) = self.aliases.get(phone) {
+                    return Some(alias.clone());
+                }
+            }
+        }
+        // Try phone from chat
+        if let Some(chat) = self.chats.get(jid) {
+            if let Some(ref phone) = chat.summary.phone {
+                if let Some(alias) = self.aliases.get(phone) {
+                    return Some(alias.clone());
+                }
+            }
+        }
+        // Try phone from JID itself
+        if let Some(phone) = jid_phone_str(jid) {
+            if let Some(alias) = self.aliases.get(&phone) {
+                return Some(alias.clone());
+            }
+        }
+        None
+    }
+
+    pub fn set_alias(&mut self, phone: String, name: String) {
+        self.aliases.insert(phone, name);
+        save_aliases_to_disk(&self.aliases);
+    }
+
+    pub fn remove_alias(&mut self, phone: &str) -> bool {
+        let removed = self.aliases.remove(phone).is_some();
+        if removed {
+            save_aliases_to_disk(&self.aliases);
+        }
+        removed
+    }
+
+    pub fn list_aliases(&self) -> Vec<ContactAlias> {
+        self.aliases
+            .iter()
+            .map(|(phone, name)| ContactAlias {
+                phone: phone.clone(),
+                name: name.clone(),
+            })
+            .collect()
     }
 
     pub fn set_contact_status(&mut self, jid: &str, status: Option<String>) {

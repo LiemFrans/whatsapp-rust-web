@@ -14,6 +14,7 @@ Uses [`whatsapp-rust`](https://github.com/jlucaso1/whatsapp-rust) for WhatsApp p
 - **Media sending** — send images, GIFs, and stickers to any chat
 - **SKDM warm-up** — automatic Sender Key Distribution Message pre-warming for group chats to prevent retry loops
 - **@Mentions** — type `@` to autocomplete group member mentions
+- **Contact aliases** — assign friendly display names to phone numbers (e.g. +6285111240397 → "Cici") for mentions and sidebar
 - **Contact & group sync** — automatic contact resolution, group metadata, and profile pictures
 - **QR code pairing** — scan to link your WhatsApp account (multi-device protocol)
 
@@ -46,7 +47,8 @@ whatsapp-rust-web/
 │   │       ├── EmojiPicker.tsx    WhatsApp-style emoji picker
 │   │       ├── GifPicker.tsx      Tenor GIF search + send
 │   │       ├── StickerPicker.tsx  Sticker grid from received messages
-│   │       └── MediaPicker.tsx    Tabbed container (Emoji/GIF/Sticker)
+│   │       ├── MediaPicker.tsx    Tabbed container (Emoji/GIF/Sticker)
+│   │       └── AliasEditor.tsx   Contact alias management modal
 │   ├── tests/                    Playwright E2E tests
 │   └── playwright.config.ts
 │
@@ -94,6 +96,9 @@ Then open **http://localhost:3030** and scan the QR code with your WhatsApp mobi
 | `POST` | `/api/messages/send-media` | Send media: `{ "jid", "phone", "url", "media_type", "caption", "width", "height" }` |
 | `GET` | `/api/media/:chat_jid/:msg_id` | Download + proxy media from WhatsApp servers |
 | `GET` | `/api/stickers` | Returns recently received stickers |
+| `GET` | `/api/contact-aliases` | List all user-defined contact aliases |
+| `PUT` | `/api/contact-aliases/:phone` | Set alias for a phone number |
+| `DELETE` | `/api/contact-aliases/:phone` | Remove alias for a phone number |
 
 ## Running Tests
 

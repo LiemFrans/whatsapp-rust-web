@@ -49,12 +49,55 @@ pub async fn resolve_mention_summaries(
 
         let name = {
             let store = state.store.read().await;
-            resolved_display_name_for_store(&store, mention_jid, phone.as_deref())
+
+            // 0. Check alias (highest priority)
+            if let Some(alias) = store.alias_for_jid(mention_jid, phone.as_deref()) {
+                log::info!("  mention resolve: alias found for {mention_jid} → {alias}");
+                alias
+            } else {
+            // 1. Try direct JID lookup
+            let direct_name = resolved_display_name_for_store(&store, mention_jid, phone.as_deref());
+            log::info!("  mention resolve step 1 (direct JID {mention_jid}): {direct_name:?}");
+
+            if !looks_like_fallback_name(&direct_name, mention_jid, phone.as_deref()) {
+                log::info!("  → using direct name");
+                direct_name
+            } else if let Some(ref p) = phone {
+                // 2. Search ALL contacts/chats by phone number
+                let by_phone = store.find_display_name_by_phone(p);
+                log::info!("  mention resolve step 2 (find_by_phone {p}): {by_phone:?}");
+
+                if let Some(found) = by_phone {
+                    log::info!("  → using phone-found name");
+                    found
+                } else {
+                    // 3. Try phone-based JID lookup
+                    let phone_jid = format!("{p}@s.whatsapp.net");
+                    let phone_name = resolved_display_name_for_store(&store, &phone_jid, Some(p));
+                    log::info!("  mention resolve step 3 (phone JID {phone_jid}): {phone_name:?}");
+                    if !looks_like_fallback_name(&phone_name, mention_jid, Some(p)) {
+                        log::info!("  → using phone-jid name");
+                        phone_name
+                    } else {
+                        log::info!("  → fallback to direct name");
+                        direct_name
+                    }
+                }
+            } else {
+                log::info!("  → no phone, using direct name");
+                direct_name
+            }
+            }
         };
+
+        log::info!(
+            "Mention: raw_jid={mention_jid} phone={phone:?} name={name}"
+        );
 
         summaries.push(MentionSummary {
             jid: mention_jid.clone(),
             name,
+            phone: phone.clone(),
         });
     }
 

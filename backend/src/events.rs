@@ -97,8 +97,24 @@ pub async fn handle_event(event: Event, client: Arc<Client>, state: AppState) {
             }
         }
         Event::PushNameUpdate(update) => {
+            let jid_str = update.jid.to_non_ad().to_string();
             let mut store = state.store.write().await;
-            store.rename_contact(&update.jid.to_non_ad().to_string(), &update.new_push_name);
+            store.push_names.insert(jid_str.clone(), update.new_push_name.clone());
+            // Upsert contact so the push name is available for mention resolution
+            if store.contacts.contains_key(&jid_str) {
+                store.rename_contact(&jid_str, &update.new_push_name);
+            } else {
+                let phone = jid_phone_str(&jid_str);
+                store.upsert_contact(ContactSummary {
+                    jid: jid_str.clone(),
+                    name: update.new_push_name.clone(),
+                    phone,
+                    status: None,
+                    avatar_url: None,
+                    is_business: false,
+                    is_registered: true,
+                });
+            }
         }
         Event::ContactUpdated(update) => {
             tokio::spawn(refresh_contact_profile(
@@ -196,7 +212,13 @@ pub async fn handle_incoming_message(
     let mention_jids = extract_context_info(&msg)
         .map(|ctx| ctx.mentioned_jid.clone())
         .unwrap_or_default();
+    if !mention_jids.is_empty() {
+        log::info!("Incoming message has mentions: text={text:?} raw_mention_jids={mention_jids:?}");
+    }
     let mention_summaries = resolve_mention_summaries(&state, &client, &mention_jids).await;
+    if !mention_summaries.is_empty() {
+        log::info!("Resolved mention summaries: {mention_summaries:?}");
+    }
     let (mentions, media, media_blob) = {
         let media = extract_media(&msg, &chat_jid, &info.id);
         match media {
@@ -230,6 +252,7 @@ pub async fn handle_incoming_message(
         }
 
         if !info.push_name.trim().is_empty() {
+            store.push_names.insert(sender_jid.clone(), info.push_name.clone());
             store.rename_contact(&sender_jid, &info.push_name);
         }
 

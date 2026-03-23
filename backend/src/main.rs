@@ -14,6 +14,9 @@
 //!   POST /api/messages/send-media       → send media (sticker/GIF/image) via URL
 //!   GET  /api/media/:chat_jid/:msg_id  → download stored media for rendering
 //!   GET  /api/stickers                  → list received sticker records
+//!   GET  /api/contact-aliases          → list all contact aliases
+//!   PUT  /api/contact-aliases/:phone   → set alias for a phone number
+//!   DELETE /api/contact-aliases/:phone → remove alias for a phone number
 
 mod events;
 mod handlers;
@@ -27,7 +30,7 @@ pub use models::*;
 
 use std::sync::Arc;
 
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use tower_http::cors::CorsLayer;
 use whatsapp_rust::bot::Bot;
@@ -53,6 +56,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/messages/send-media", post(handlers::send_media))
         .route("/api/media/:chat_jid/:message_id", get(handlers::get_media))
         .route("/api/stickers", get(handlers::get_stickers))
+        .route("/api/contact-aliases", get(handlers::get_aliases))
+        .route("/api/contact-aliases/:phone", put(handlers::set_alias))
+        .route("/api/contact-aliases/:phone", delete(handlers::delete_alias))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -67,6 +73,16 @@ async fn main() -> anyhow::Result<()> {
 
     let db_path = "whatsapp.db";
     let state = AppState::new(db_path);
+
+    // Load persisted contact aliases from disk
+    {
+        let aliases = store::load_aliases_from_disk();
+        if !aliases.is_empty() {
+            log::info!("Loaded {} contact alias(es) from disk", aliases.len());
+        }
+        state.store.write().await.aliases = aliases;
+    }
+
     let handler_state = state.clone();
 
     log::info!("Initialising WhatsApp client …");

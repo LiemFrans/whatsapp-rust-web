@@ -10,7 +10,7 @@ export interface ApiMessage {
   text: string;
   timestamp_ms: number;
   from_me: boolean;
-  mentions: { jid: string; name: string }[];
+  mentions: { jid: string; name: string; phone?: string | null }[];
   media: {
     kind: string;
     mime_type: string | null;
@@ -65,4 +65,17 @@ export interface BootstrapResponse {
   chats: ApiChat[];
   contacts: ApiContact[];
   logout_hint: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Contact aliases
+// ---------------------------------------------------------------------------
+
+export interface ContactAlias {
+  phone: string;
+  name: string;
+}
+
+export interface AliasListResponse {
+  aliases: ContactAlias[];
 }

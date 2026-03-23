@@ -148,6 +148,15 @@ pub fn render_text_with_mentions(text: &str, mentions: &[MentionSummary]) -> Str
         }
         let label = format!("@{}", mention.name.trim_start_matches('+'));
         output = output.replace(&format!("@{token}"), &label);
+
+        // Also replace by phone token (handles LID mentions where the text
+        // contains the LID number but we also want @phone → @Name)
+        if let Some(ref phone) = mention.phone {
+            output = output.replace(&format!("@{phone}"), &label);
+        }
+        if let Some(phone) = jid_phone_str(&mention.jid) {
+            output = output.replace(&format!("@{phone}"), &label);
+        }
     }
     output
 }
