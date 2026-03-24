@@ -92,26 +92,42 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ isLoadingMessages: true });
     try {
       const res = await chatApi.messages(chatId, { cursor, limit: 50 });
-      const newMessages = res.data.messages as Message[];
+      const dbMessages = res.data.messages as Message[];
 
       if (cursor) {
-        set((state) => ({
-          messages: {
-            ...state.messages,
-            [chatId]: [...newMessages, ...(state.messages[chatId] || [])],
-          },
-          isLoadingMessages: false,
-          hasMoreMessages: res.data.has_more,
-        }));
+        // Prepend older messages (pagination)
+        set((state) => {
+          const existing = state.messages[chatId] || [];
+          const merged = [...dbMessages, ...existing];
+          // Deduplicate by id, keeping the first occurrence
+          const seen = new Set<string>();
+          const unique = merged.filter((m) => {
+            if (seen.has(m.id)) return false;
+            seen.add(m.id);
+            return true;
+          });
+          return {
+            messages: { ...state.messages, [chatId]: unique },
+            isLoadingMessages: false,
+            hasMoreMessages: res.data.has_more,
+          };
+        });
       } else {
-        set((state) => ({
-          messages: {
-            ...state.messages,
-            [chatId]: newMessages,
-          },
-          isLoadingMessages: false,
-          hasMoreMessages: res.data.has_more,
-        }));
+        // Initial load: merge DB results with any WS messages already in memory
+        set((state) => {
+          const existing = state.messages[chatId] || [];
+          const dbIds = new Set(dbMessages.map((m) => m.id));
+          // Keep WS messages that aren't already in DB results
+          const wsOnly = existing.filter((m) => !dbIds.has(m.id));
+          const merged = [...dbMessages, ...wsOnly];
+          // Sort by timestamp ascending
+          merged.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+          return {
+            messages: { ...state.messages, [chatId]: merged },
+            isLoadingMessages: false,
+            hasMoreMessages: res.data.has_more,
+          };
+        });
       }
     } catch (err) {
       console.error('Failed to fetch messages:', err);

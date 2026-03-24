@@ -29,7 +29,7 @@ export default function PersonalMode() {
     sessions,
     chats,
     messages,
-    isLoading,
+    isLoadingMessages,
     fetchSessions,
     fetchChats,
     fetchMessages,
@@ -198,7 +198,7 @@ export default function PersonalMode() {
 
             {/* Messages */}
             <div className="chat-bg flex-1 overflow-y-auto py-4 scrollbar-thin">
-              {isLoading ? (
+              {isLoadingMessages ? (
                 <div className="flex h-full items-center justify-center">
                   <Loader2 size={32} className="animate-spin text-wa-green" />
                 </div>

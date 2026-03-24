@@ -32,6 +32,18 @@ pub async fn run_migrations(pool: &PgPool) -> anyhow::Result<()> {
         tracing::info!("Database migrations applied");
     }
 
+    // Always apply incremental migration 002 (uses IF NOT EXISTS, safe to re-run)
+    let sql_002 = include_str!("../../../database/migrations/002_add_media_keys_and_contacts.sql");
+    let stmts_002 = split_sql_statements(sql_002);
+    for stmt in &stmts_002 {
+        let s = stmt.trim();
+        if !s.is_empty() && !s.starts_with("--") {
+            if let Err(e) = sqlx::query(s).execute(pool).await {
+                tracing::warn!("Migration 002 statement (may be harmless): {}", e);
+            }
+        }
+    }
+
     Ok(())
 }
 
