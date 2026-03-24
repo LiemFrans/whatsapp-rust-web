@@ -1,0 +1,68 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: wa-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-whatsapp_web}
+      POSTGRES_USER: ${POSTGRES_USER:-wauser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wapassword}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-wauser} -d ${POSTGRES_DB:-whatsapp_web}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: wa-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-wauser}:${POSTGRES_PASSWORD:-wapassword}@postgres:5432/${POSTGRES_DB:-whatsapp_web}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production-please}
+      JWT_EXPIRY_HOURS: ${JWT_EXPIRY_HOURS:-24}
+      REFRESH_TOKEN_EXPIRY_DAYS: ${REFRESH_TOKEN_EXPIRY_DAYS:-7}
+      RUST_LOG: ${RUST_LOG:-info,whatsapp_web_backend=debug}
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8080
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      SESSION_ENCRYPTION_KEY: ${SESSION_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef}
+      SYNC_DAYS_LIMIT: ${SYNC_DAYS_LIMIT:-90}
+      SESSION_DB_DIR: /app/sessions
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    volumes:
+      - wa_sessions:/app/sessions
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: wa-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    environment:
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:8080}
+      VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:8080}
+
+volumes:
+  postgres_data:
+  wa_sessions:
