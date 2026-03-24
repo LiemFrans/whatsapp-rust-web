@@ -1,11 +1,12 @@
 import type { Chat } from '@/types';
+import type { ContactsMap } from '@/store/chatStore';
 
 /**
  * Get a clean display name for a chat.
  * Shows "Name (+phone)" when both are available, like WhatsApp Web.
- * Falls back gracefully from name → phone_number → cleaned JID.
+ * Falls back gracefully from name → contacts → phone_number → cleaned JID.
  */
-export function getChatDisplayName(chat: Chat): string {
+export function getChatDisplayName(chat: Chat, contacts?: ContactsMap): string {
   const hasName = chat.name && !isRawIdentifier(chat.name);
   const hasPhone = chat.phone_number && chat.phone_number.trim() !== '';
 
@@ -20,6 +21,12 @@ export function getChatDisplayName(chat: Chat): string {
     return chat.name!;
   }
 
+  // Try contacts lookup by chat_jid
+  if (contacts) {
+    const resolved = resolveFromContacts(chat.chat_jid, contacts);
+    if (resolved) return resolved;
+  }
+
   // Use phone number if available
   if (hasPhone) {
     return chat.phone_number!.startsWith('+') ? chat.phone_number! : `+${chat.phone_number!}`;
@@ -31,24 +38,39 @@ export function getChatDisplayName(chat: Chat): string {
 
 /**
  * Clean a sender JID/name for display in group chat bubbles.
- * Shows "~ Name" like WhatsApp Web when a push name is available.
- * Falls back to cleaned sender JID, then phone-like format.
+ * Shows "~ Name (+phone)" like WhatsApp Web when a push name is available.
+ * Uses contacts map for fallback resolution.
  */
-export function cleanSenderDisplay(senderName?: string | null, sender?: string | null): string {
+export function cleanSenderDisplay(
+  senderName?: string | null,
+  sender?: string | null,
+  contacts?: ContactsMap,
+): string {
   // Use sender_name if it's a real name (not a raw identifier)
   if (senderName && !isRawIdentifier(senderName)) {
-    // Extract phone from sender JID if available
-    const phone = extractPhoneFromJid(sender);
+    // Try to find phone from contacts or sender JID
+    const phone = findPhoneForSender(sender, contacts);
     if (phone) {
-      return `~ ${senderName} (+${phone})`;
+      return `~ ${senderName} (${phone})`;
     }
     return `~ ${senderName}`;
   }
 
-  // If sender is empty/missing, use sender_name if we have one, else "Participant"
-  if (!sender || sender === '' || sender === 'me') {
-    if (senderName) return cleanJidForDisplay(senderName, false);
-    return 'Participant';
+  // Try contacts lookup by sender JID
+  if (sender && contacts) {
+    const resolved = resolveFromContacts(sender, contacts);
+    if (resolved) return `~ ${resolved}`;
+  }
+
+  // Handle 'me' sender (outgoing messages in history sync)
+  if (sender === 'me') {
+    return '~ You';
+  }
+
+  // If sender is empty/missing, use sender_name if we have one, else try JID display
+  if (!sender || sender === '') {
+    if (senderName) return `~ ${cleanJidForDisplay(senderName, false)}`;
+    return '~ Unknown';
   }
 
   // Strip @server part
@@ -58,29 +80,46 @@ export function cleanSenderDisplay(senderName?: string | null, sender?: string |
 
   // If it looks like a phone number (10-15 digits), format with +
   if (/^\d{10,15}$/.test(cleanUser)) {
-    return `+${cleanUser}`;
+    return `~ +${cleanUser}`;
   }
 
-  // For shorter numbers or other formats, just show as-is
+  // For shorter numbers or other formats, just show as-is with prefix
   if (/^\d+$/.test(cleanUser)) {
-    return `~${cleanUser}`;
+    return `~ ${cleanUser}`;
   }
 
-  return cleanUser || 'Participant';
+  return cleanUser ? `~ ${cleanUser}` : '~ Unknown';
 }
 
 /**
  * Format @mentions in message text.
- * Replaces @<LID_number> patterns with styled @+<number> or @User format.
+ * Replaces @<number> patterns with resolved contact names from the contacts map.
+ * Falls back to @+<number> or @User for unresolved mentions.
  */
-export function formatMentions(text: string): string {
-  // Match @<digits> patterns (LID mentions like @149615370338545)
-  return text.replace(/@(\d{10,20})/g, (_match, digits: string) => {
-    // If it's 10-15 digits, likely a phone number
+export function formatMentions(text: string, contacts?: ContactsMap): string {
+  // Match @<digits> patterns — phone numbers, LID mentions
+  // Also match @+<digits> patterns that the backend may already prefix
+  return text.replace(/@\+?(\d{6,20})/g, (_match, digits: string) => {
+    // Try contacts lookup
+    if (contacts) {
+      const contact = contacts[digits];
+      if (contact?.push_name) {
+        return `@${contact.push_name}`;
+      }
+      // Also try with common JID suffixes
+      const sJid = `${digits}@s.whatsapp.net`;
+      const lidJid = `${digits}@lid`;
+      const fromS = contacts[sJid];
+      const fromLid = contacts[lidJid];
+      if (fromS?.push_name) return `@${fromS.push_name}`;
+      if (fromLid?.push_name) return `@${fromLid.push_name}`;
+    }
+
+    // Fallback: if it looks like a phone number, show @+number
     if (digits.length >= 10 && digits.length <= 15) {
       return `@+${digits}`;
     }
-    // Longer numbers are LID identifiers — show shortened
+    // Longer numbers are LID identifiers — show @User
     return `@User`;
   });
 }
@@ -97,6 +136,56 @@ export function isRawIdentifier(name: string): boolean {
     return true;
   }
   return false;
+}
+
+/**
+ * Resolve a JID to a display string using the contacts map.
+ * Returns "PushName (+phone)" or "PushName" or null if not found.
+ */
+function resolveFromContacts(jid: string, contacts: ContactsMap): string | null {
+  // Try exact match
+  let contact = contacts[jid];
+  if (!contact) {
+    // Try user part
+    const userPart = jid.split('@')[0];
+    contact = contacts[userPart];
+    if (!contact) {
+      // Try without device suffix
+      const cleanUser = userPart.split(':')[0];
+      contact = contacts[cleanUser];
+    }
+  }
+  if (!contact?.push_name) return null;
+
+  if (contact.phone_number) {
+    const phone = contact.phone_number.startsWith('+') ? contact.phone_number : `+${contact.phone_number}`;
+    return `${contact.push_name} (${phone})`;
+  }
+  return contact.push_name;
+}
+
+/**
+ * Find a phone number for a sender from contacts or JID extraction
+ */
+function findPhoneForSender(sender?: string | null, contacts?: ContactsMap): string | null {
+  if (!sender) return null;
+
+  // Check contacts for phone_number
+  if (contacts) {
+    const contact = contacts[sender] ||
+      contacts[sender.split('@')[0]] ||
+      contacts[sender.split('@')[0].split(':')[0]];
+    if (contact?.phone_number) {
+      const p = contact.phone_number;
+      return p.startsWith('+') ? p : `+${p}`;
+    }
+  }
+
+  // Extract from JID if it's a phone-based JID
+  const phone = extractPhoneFromJid(sender);
+  if (phone) return `+${phone}`;
+
+  return null;
 }
 
 /**

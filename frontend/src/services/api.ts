@@ -80,6 +80,8 @@ export const chatApi = {
   list: (params?: { session_id?: string; search?: string; filter?: string; page?: number }) =>
     api.get('/chats', { params }),
   get: (chatId: string) => api.get(`/chats/${chatId}`),
+  contacts: (params?: { session_id?: string }) =>
+    api.get('/chats/contacts', { params }),
   messages: (chatId: string, params?: { cursor?: string; limit?: number }) =>
     api.get(`/chats/${chatId}/messages`, { params }),
   send: (chatId: string, content: string, reply_to?: string) =>
@@ -93,8 +95,11 @@ export const chatApi = {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
   },
-  mediaUrl: (chatId: string, messageId: string) =>
-    `${API_URL}/api/chats/${chatId}/messages/${messageId}/media`,
+  mediaUrl: (chatId: string, messageId: string) => {
+    const token = localStorage.getItem('access_token');
+    const base = `${API_URL}/api/chats/${chatId}/messages/${messageId}/media`;
+    return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+  },
   markRead: (chatId: string) => api.post(`/chats/${chatId}/read`),
   toggleArchive: (chatId: string) => api.post(`/chats/${chatId}/archive`),
   togglePin: (chatId: string) => api.post(`/chats/${chatId}/pin`),

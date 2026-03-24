@@ -542,6 +542,17 @@ pub async fn handle_event(
             .execute(db)
             .await;
 
+            // Notify frontend about the contact update
+            ws_hub.send_to_user(user_id, serde_json::json!({
+                "type": "contacts_updated",
+                "data": {
+                    "session_id": session_id,
+                    "jid": jid,
+                    "push_name": new_name,
+                    "phone_number": phone,
+                }
+            }));
+
             // Update chat name for exact JID match
             let result = sqlx::query(
                 "UPDATE chats SET name = $2 WHERE session_id = $1 AND chat_jid = $3 AND (name IS NULL OR name = chat_jid OR name LIKE '%@lid' OR name LIKE '+%∙%')",

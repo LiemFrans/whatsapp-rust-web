@@ -29,13 +29,16 @@ export default function PersonalMode() {
     sessions,
     chats,
     messages,
+    contacts,
     isLoadingMessages,
     fetchSessions,
     fetchChats,
+    fetchContacts,
     fetchMessages,
     sendMessage,
     sendMedia,
     connectSession,
+    setActiveChat,
   } = useChatStore();
 
   // Initialize WebSocket event handling
@@ -69,8 +72,9 @@ export default function PersonalMode() {
   useEffect(() => {
     if (sessions.length > 0) {
       fetchChats(sessions[0].id);
+      fetchContacts(sessions[0].id);
     }
-  }, [sessions, fetchChats]);
+  }, [sessions, fetchChats, fetchContacts]);
 
   // Load messages when chat selected
   useEffect(() => {
@@ -88,6 +92,11 @@ export default function PersonalMode() {
     setSelectedChatId(chatId);
     setReplyTo(null);
   }, []);
+
+  useEffect(() => {
+    const chat = chats.find((c) => c.id === selectedChatId) || null;
+    setActiveChat(chat);
+  }, [selectedChatId, chats, setActiveChat]);
 
   const handleSendMessage = useCallback(
     (content: string) => {
@@ -125,7 +134,7 @@ export default function PersonalMode() {
   const currentMessages = selectedChatId ? (messages[selectedChatId] || []) : [];
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full overflow-hidden">
       {/* Sidebar */}
       <Sidebar
         activeTab={activeTab}
@@ -166,13 +175,14 @@ export default function PersonalMode() {
               onSelectChat={handleSelectChat}
               searchQuery={searchQuery}
               onSearchChange={setSearchQuery}
+              contacts={contacts}
             />
           </>
         )}
       </div>
 
       {/* Chat area */}
-      <div className="flex flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
         {selectedChat ? (
           <>
             {/* Chat header */}
@@ -182,13 +192,13 @@ export default function PersonalMode() {
                   <img src={selectedChat.profile_pic_url} alt="" className="h-full w-full rounded-full object-cover" />
                 ) : (
                   <span className="font-semibold">
-                    {getChatDisplayName(selectedChat)[0]?.toUpperCase() || '?'}
+                    {getChatDisplayName(selectedChat, contacts)[0]?.toUpperCase() || '?'}
                   </span>
                 )}
               </div>
               <div className="min-w-0 flex-1">
                 <h3 className="truncate font-medium text-gray-900 dark:text-white">
-                  {getChatDisplayName(selectedChat)}
+                  {getChatDisplayName(selectedChat, contacts)}
                 </h3>
                 <p className="truncate text-xs text-gray-500">
                   {selectedChat.is_group ? 'Group' : selectedChat.phone_number || 'Online'}
@@ -215,6 +225,7 @@ export default function PersonalMode() {
                       message={msg}
                       chatId={selectedChatId!}
                       showSender={selectedChat.is_group}
+                      contacts={contacts}
                       onReply={setReplyTo}
                     />
                   ))}

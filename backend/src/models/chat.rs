@@ -42,3 +42,18 @@ pub struct MessageListQuery {
 pub struct SyncRequest {
     pub session_id: Option<Uuid>,
 }
+
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct Contact {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub jid: String,
+    pub push_name: Option<String>,
+    pub phone_number: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ContactsQuery {
+    pub session_id: Option<Uuid>,
+}

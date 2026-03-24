@@ -37,6 +37,15 @@ export interface WhatsAppSession {
 
 // ── Chat ──────────────────────────────────────────────────────
 
+export interface Contact {
+  id: string;
+  session_id: string;
+  jid: string;
+  push_name: string | null;
+  phone_number: string | null;
+  updated_at: string;
+}
+
 export interface Chat {
   id: string;
   session_id: string;

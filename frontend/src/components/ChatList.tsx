@@ -15,6 +15,7 @@ import {
   Contact,
 } from 'lucide-react';
 import type { Chat } from '@/types';
+import type { ContactsMap } from '@/store/chatStore';
 import { getChatDisplayName } from '@/utils/chat';
 
 interface ChatListProps {
@@ -23,6 +24,7 @@ interface ChatListProps {
   onSelectChat: (chatId: string) => void;
   searchQuery: string;
   onSearchChange: (query: string) => void;
+  contacts?: ContactsMap;
 }
 
 export default function ChatList({
@@ -31,6 +33,7 @@ export default function ChatList({
   onSelectChat,
   searchQuery,
   onSearchChange,
+  contacts,
 }: ChatListProps) {
   const filteredChats = useMemo(() => {
     if (!searchQuery.trim()) return chats;
@@ -73,6 +76,7 @@ export default function ChatList({
               chat={chat}
               isSelected={chat.id === selectedChatId}
               onClick={() => onSelectChat(chat.id)}
+              contacts={contacts}
             />
           ))
         )}
@@ -85,10 +89,12 @@ function ChatListItem({
   chat,
   isSelected,
   onClick,
+  contacts,
 }: {
   chat: Chat;
   isSelected: boolean;
   onClick: () => void;
+  contacts?: ContactsMap;
 }) {
   const lastMsgTime = (() => {
     if (!chat.last_message_at) return '';
@@ -138,7 +144,7 @@ function ChatListItem({
             <img src={chat.profile_pic_url} alt="" className="h-full w-full object-cover" />
           ) : (
             <span className="text-lg font-semibold">
-              {getChatDisplayName(chat)[0]?.toUpperCase() || '?'}
+              {getChatDisplayName(chat, contacts)[0]?.toUpperCase() || '?'}
             </span>
           )}
         </div>
@@ -148,7 +154,7 @@ function ChatListItem({
       <div className="min-w-0 flex-1">
         <div className="flex items-center justify-between gap-2">
           <h3 className="text-sm font-medium text-gray-900 dark:text-white break-words leading-tight">
-            {getChatDisplayName(chat)}
+            {getChatDisplayName(chat, contacts)}
           </h3>
           <span className="shrink-0 text-xs text-gray-500">{lastMsgTime}</span>
         </div>

@@ -8,6 +8,9 @@ import {
   MessageSquare,
   BarChart3,
   ArrowUpRight,
+  X,
+  Check,
+  AlertCircle,
 } from 'lucide-react';
 import Sidebar, { type SidebarTab } from '@/components/Sidebar';
 import ChatList from '@/components/ChatList';
@@ -40,13 +43,16 @@ export default function BusinessMode() {
     sessions,
     chats,
     messages,
+    contacts,
     isLoadingMessages,
     fetchSessions,
     fetchChats,
+    fetchContacts,
     fetchMessages,
     sendMessage,
     sendMedia,
     connectSession,
+    setActiveChat,
   } = useChatStore();
 
   const {
@@ -60,7 +66,20 @@ export default function BusinessMode() {
     fetchAnalytics,
     fetchQuickReplies,
     takeChat,
+    createTicket,
+    createQuickReply,
   } = useBusinessStore();
+
+  // Toast notification state
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3000);
+  }, []);
+
+  // Modal states
+  const [showCreateTicket, setShowCreateTicket] = useState(false);
+  const [showCreateQuickReply, setShowCreateQuickReply] = useState(false);
 
   useWebSocket();
 
@@ -95,8 +114,9 @@ export default function BusinessMode() {
   useEffect(() => {
     if (sessions.length > 0) {
       fetchChats(sessions[0].id);
+      fetchContacts(sessions[0].id);
     }
-  }, [sessions, fetchChats]);
+  }, [sessions, fetchChats, fetchContacts]);
 
   useEffect(() => {
     if (selectedChatId) {
@@ -112,6 +132,11 @@ export default function BusinessMode() {
     setSelectedChatId(chatId);
     setReplyTo(null);
   }, []);
+
+  useEffect(() => {
+    const chat = chats.find((c) => c.id === selectedChatId) || null;
+    setActiveChat(chat);
+  }, [selectedChatId, chats, setActiveChat]);
 
   const handleSendMessage = useCallback(
     (content: string) => {
@@ -131,9 +156,15 @@ export default function BusinessMode() {
   );
 
   const handleTakeChat = async (chatId: string, _sessionId: string) => {
-    await takeChat(chatId);
-    fetchQueue();
-    fetchMyChats();
+    try {
+      await takeChat(chatId);
+      fetchQueue();
+      fetchMyChats();
+      showToast('Chat assigned to you successfully');
+    } catch (err: any) {
+      const msg = err?.response?.data?.error || 'Failed to take chat';
+      showToast(msg, 'error');
+    }
   };
 
   const handleConnectSession = async () => {
@@ -162,6 +193,7 @@ export default function BusinessMode() {
             selectedChatId={selectedChatId}
             onSelectChat={handleSelectChat}
             onTakeChat={handleTakeChat}
+            contacts={contacts}
           />
         );
       case 'my-chats':
@@ -176,15 +208,16 @@ export default function BusinessMode() {
               onSelectChat={handleSelectChat}
               searchQuery={searchQuery}
               onSearchChange={setSearchQuery}
+              contacts={contacts}
             />
           </div>
         );
       case 'tickets':
-        return <TicketPanel tickets={tickets} />;
+        return <TicketPanel tickets={tickets} onCreateTicket={() => setShowCreateTicket(true)} />;
       case 'analytics':
         return <AnalyticsPanel analytics={analytics} />;
       case 'quick-replies':
-        return <QuickRepliesPanel quickReplies={quickReplies} />;
+        return <QuickRepliesPanel quickReplies={quickReplies} onCreateQuickReply={() => setShowCreateQuickReply(true)} />;
       case 'settings':
         return <SettingsPanel onConnectSession={handleConnectSession} />;
       default:
@@ -195,13 +228,14 @@ export default function BusinessMode() {
             onSelectChat={handleSelectChat}
             searchQuery={searchQuery}
             onSearchChange={setSearchQuery}
+            contacts={contacts}
           />
         );
     }
   };
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full overflow-hidden">
       <Sidebar
         activeTab={activeTab}
         onTabChange={setActiveTab}
@@ -214,18 +248,18 @@ export default function BusinessMode() {
       <div className="w-80 shrink-0">{renderPanel()}</div>
 
       {/* Chat area */}
-      <div className="flex flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
         {selectedChat ? (
           <>
             <div className="flex h-14 items-center gap-3 border-b border-gray-200 bg-gray-50 px-4 dark:border-gray-700 dark:bg-wa-dark-header">
               <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gray-300 text-white dark:bg-gray-600">
                 <span className="font-semibold">
-                  {getChatDisplayName(selectedChat)[0]?.toUpperCase() || '?'}
+                  {getChatDisplayName(selectedChat, contacts)[0]?.toUpperCase() || '?'}
                 </span>
               </div>
               <div className="min-w-0 flex-1">
                 <h3 className="truncate font-medium text-gray-900 dark:text-white">
-                  {getChatDisplayName(selectedChat)}
+                  {getChatDisplayName(selectedChat, contacts)}
                 </h3>
                 <p className="truncate text-xs text-gray-500">
                   {selectedChat.assigned_agent_name
@@ -257,6 +291,7 @@ export default function BusinessMode() {
                       message={msg}
                       chatId={selectedChatId!}
                       showSender={selectedChat.is_group}
+                      contacts={contacts}
                       onReply={setReplyTo}
                     />
                   ))}
@@ -295,6 +330,52 @@ export default function BusinessMode() {
         sessionName={sessionName}
         status={qrStatus}
       />
+
+      {/* Create Ticket Modal */}
+      {showCreateTicket && (
+        <CreateTicketModal
+          chats={chats}
+          contacts={contacts}
+          selectedChatId={selectedChatId}
+          onClose={() => setShowCreateTicket(false)}
+          onSubmit={async (data) => {
+            try {
+              await createTicket(data);
+              await fetchTickets();
+              setShowCreateTicket(false);
+              showToast('Ticket created successfully');
+            } catch (err: any) {
+              showToast(err?.response?.data?.error || 'Failed to create ticket', 'error');
+            }
+          }}
+        />
+      )}
+
+      {/* Create Quick Reply Modal */}
+      {showCreateQuickReply && (
+        <CreateQuickReplyModal
+          onClose={() => setShowCreateQuickReply(false)}
+          onSubmit={async (data) => {
+            try {
+              await createQuickReply(data);
+              setShowCreateQuickReply(false);
+              showToast('Quick reply created successfully');
+            } catch (err: any) {
+              showToast(err?.response?.data?.error || 'Failed to create quick reply', 'error');
+            }
+          }}
+        />
+      )}
+
+      {/* Toast Notification */}
+      {toast && (
+        <div className={`fixed bottom-6 left-1/2 z-50 flex -translate-x-1/2 items-center gap-2 rounded-lg px-4 py-3 text-sm font-medium text-white shadow-lg transition-all ${
+          toast.type === 'success' ? 'bg-wa-green' : 'bg-red-500'
+        }`}>
+          {toast.type === 'success' ? <Check size={16} /> : <AlertCircle size={16} />}
+          {toast.message}
+        </div>
+      )}
     </div>
   );
 }
@@ -306,11 +387,13 @@ function QueuePanel({
   selectedChatId,
   onSelectChat,
   onTakeChat,
+  contacts,
 }: {
   chats: Chat[];
   selectedChatId: string | null;
   onSelectChat: (id: string) => void;
   onTakeChat: (chatId: string, sessionId: string) => void;
+  contacts?: import('@/store/chatStore').ContactsMap;
 }) {
   return (
     <div className="flex h-full flex-col">
@@ -340,11 +423,11 @@ function QueuePanel({
                 className="mb-2 flex w-full items-center gap-3 text-left"
               >
                 <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gray-300 text-sm font-bold text-white dark:bg-gray-600">
-                  {getChatDisplayName(chat)[0]?.toUpperCase() || '?'}
+                  {getChatDisplayName(chat, contacts)[0]?.toUpperCase() || '?'}
                 </div>
                 <div className="min-w-0 flex-1">
                   <h4 className="truncate text-sm font-medium text-gray-900 dark:text-white">
-                    {getChatDisplayName(chat)}
+                    {getChatDisplayName(chat, contacts)}
                   </h4>
                   <p className="truncate text-xs text-gray-500">{chat.last_message}</p>
                 </div>
@@ -370,7 +453,7 @@ function QueuePanel({
 
 // ─── Ticket Panel ───────────────────────────────────────────────
 
-function TicketPanel({ tickets }: { tickets: Ticket[] }) {
+function TicketPanel({ tickets, onCreateTicket }: { tickets: Ticket[]; onCreateTicket: () => void }) {
   const statusColors: Record<string, string> = {
     open: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
     in_progress: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400',
@@ -390,9 +473,18 @@ function TicketPanel({ tickets }: { tickets: Ticket[] }) {
     <div className="flex h-full flex-col">
       <div className="flex h-14 items-center justify-between border-b border-gray-200 bg-wa-header px-4 dark:border-gray-700 dark:bg-wa-dark-header">
         <h2 className="text-lg font-semibold text-white">Tickets</h2>
-        <span className="rounded-full bg-white/20 px-2 py-0.5 text-xs text-white">
-          {tickets.length}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="rounded-full bg-white/20 px-2 py-0.5 text-xs text-white">
+            {tickets.length}
+          </span>
+          <button
+            onClick={onCreateTicket}
+            className="rounded-full bg-white/20 p-1.5 text-white hover:bg-white/30"
+            title="Create Ticket"
+          >
+            <Plus size={16} />
+          </button>
+        </div>
       </div>
       <div className="flex-1 overflow-y-auto">
         {tickets.length === 0 ? (
@@ -496,12 +588,16 @@ function AnalyticsPanel({ analytics }: { analytics: any }) {
 
 // ─── Quick Replies Panel ────────────────────────────────────────
 
-function QuickRepliesPanel({ quickReplies }: { quickReplies: any[] }) {
+function QuickRepliesPanel({ quickReplies, onCreateQuickReply }: { quickReplies: any[]; onCreateQuickReply: () => void }) {
   return (
     <div className="flex h-full flex-col">
       <div className="flex h-14 items-center justify-between border-b border-gray-200 bg-wa-header px-4 dark:border-gray-700 dark:bg-wa-dark-header">
         <h2 className="text-lg font-semibold text-white">Quick Replies</h2>
-        <button className="rounded-full bg-white/20 p-1.5 text-white hover:bg-white/30">
+        <button
+          onClick={onCreateQuickReply}
+          className="rounded-full bg-white/20 p-1.5 text-white hover:bg-white/30"
+          title="Create Quick Reply"
+        >
           <Plus size={16} />
         </button>
       </div>
@@ -529,6 +625,251 @@ function QuickRepliesPanel({ quickReplies }: { quickReplies: any[] }) {
             </div>
           ))
         )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Create Ticket Modal ────────────────────────────────────────
+
+function CreateTicketModal({
+  chats,
+  contacts,
+  selectedChatId,
+  onClose,
+  onSubmit,
+}: {
+  chats: Chat[];
+  contacts?: import('@/store/chatStore').ContactsMap;
+  selectedChatId: string | null;
+  onClose: () => void;
+  onSubmit: (data: Record<string, unknown>) => Promise<void>;
+}) {
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [priority, setPriority] = useState<'low' | 'medium' | 'high' | 'critical'>('medium');
+  const [category, setCategory] = useState('');
+  const [chatId, setChatId] = useState(selectedChatId || '');
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!title.trim() || !chatId) return;
+    setSubmitting(true);
+    try {
+      await onSubmit({
+        chat_id: chatId,
+        title: title.trim(),
+        description: description.trim() || undefined,
+        priority,
+        category: category.trim() || undefined,
+      });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div className="mx-4 w-full max-w-md rounded-xl bg-white shadow-2xl dark:bg-gray-800" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4 dark:border-gray-700">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Create Ticket</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
+            <X size={20} />
+          </button>
+        </div>
+        <form onSubmit={handleSubmit} className="space-y-4 p-5">
+          <div>
+            <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Chat *</label>
+            <select
+              value={chatId}
+              onChange={(e) => setChatId(e.target.value)}
+              required
+              className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-wa-green focus:outline-none focus:ring-1 focus:ring-wa-green dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+            >
+              <option value="">Select a chat</option>
+              {chats.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {getChatDisplayName(c, contacts)}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Title *</label>
+            <input
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              required
+              placeholder="Brief ticket title"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-wa-green focus:outline-none focus:ring-1 focus:ring-wa-green dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Description</label>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              rows={3}
+              placeholder="Optional details..."
+              className="w-full resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-wa-green focus:outline-none focus:ring-1 focus:ring-wa-green dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+            />
+          </div>
+          <div className="flex gap-3">
+            <div className="flex-1">
+              <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Priority</label>
+              <select
+                value={priority}
+                onChange={(e) => setPriority(e.target.value as any)}
+                className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-wa-green focus:outline-none focus:ring-1 focus:ring-wa-green dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+              >
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+                <option value="critical">Critical</option>
+              </select>
+            </div>
+            <div className="flex-1">
+              <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Category</label>
+              <input
+                type="text"
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
+                placeholder="e.g. billing"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-wa-green focus:outline-none focus:ring-1 focus:ring-wa-green dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+              />
+            </div>
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-lg px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={submitting || !title.trim() || !chatId}
+              className="flex items-center gap-2 rounded-lg bg-wa-green px-4 py-2 text-sm font-medium text-white hover:bg-wa-green/90 disabled:opacity-50"
+            >
+              {submitting && <Loader2 size={14} className="animate-spin" />}
+              Create Ticket
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ─── Create Quick Reply Modal ───────────────────────────────────
+
+function CreateQuickReplyModal({
+  onClose,
+  onSubmit,
+}: {
+  onClose: () => void;
+  onSubmit: (data: Record<string, unknown>) => Promise<void>;
+}) {
+  const [title, setTitle] = useState('');
+  const [shortcut, setShortcut] = useState('');
+  const [content, setContent] = useState('');
+  const [category, setCategory] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!title.trim() || !content.trim()) return;
+    setSubmitting(true);
+    try {
+      await onSubmit({
+        title: title.trim(),
+        shortcut: shortcut.trim() || undefined,
+        content: content.trim(),
+        category: category.trim() || undefined,
+        is_global: false,
+      });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div className="mx-4 w-full max-w-md rounded-xl bg-white shadow-2xl dark:bg-gray-800" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4 dark:border-gray-700">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Create Quick Reply</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
+            <X size={20} />
+          </button>
+        </div>
+        <form onSubmit={handleSubmit} className="space-y-4 p-5">
+          <div>
+            <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Title *</label>
+            <input
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              required
+              placeholder="e.g. Greeting"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-wa-green focus:outline-none focus:ring-1 focus:ring-wa-green dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Shortcut</label>
+            <div className="flex items-center gap-1">
+              <span className="text-sm text-gray-400">/</span>
+              <input
+                type="text"
+                value={shortcut}
+                onChange={(e) => setShortcut(e.target.value.replace(/\s/g, ''))}
+                placeholder="greeting"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-wa-green focus:outline-none focus:ring-1 focus:ring-wa-green dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+              />
+            </div>
+            <p className="mt-0.5 text-xs text-gray-400">Type /{shortcut || 'shortcut'} in message input to use</p>
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Content *</label>
+            <textarea
+              value={content}
+              onChange={(e) => setContent(e.target.value)}
+              required
+              rows={4}
+              placeholder="The message content that will be sent..."
+              className="w-full resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-wa-green focus:outline-none focus:ring-1 focus:ring-wa-green dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Category</label>
+            <input
+              type="text"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              placeholder="e.g. greetings, billing"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-wa-green focus:outline-none focus:ring-1 focus:ring-wa-green dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+            />
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-lg px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={submitting || !title.trim() || !content.trim()}
+              className="flex items-center gap-2 rounded-lg bg-wa-green px-4 py-2 text-sm font-medium text-white hover:bg-wa-green/90 disabled:opacity-50"
+            >
+              {submitting && <Loader2 size={14} className="animate-spin" />}
+              Create Quick Reply
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );

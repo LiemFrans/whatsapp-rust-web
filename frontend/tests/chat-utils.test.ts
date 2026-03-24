@@ -106,24 +106,24 @@ describe('cleanSenderDisplay', () => {
     expect(result).toBe('~ Bob');
   });
 
-  it('shows +phone from JID when no sender name', () => {
+  it('shows ~ +phone from JID when no sender name', () => {
     const result = cleanSenderDisplay(null, '6281380888035@s.whatsapp.net');
-    expect(result).toBe('+6281380888035');
+    expect(result).toBe('~ +6281380888035');
   });
 
   it('strips device suffix from sender JID', () => {
     const result = cleanSenderDisplay(null, '6281380888035:71@s.whatsapp.net');
-    expect(result).toBe('+6281380888035');
+    expect(result).toBe('~ +6281380888035');
   });
 
-  it('returns "Participant" when no info available', () => {
+  it('returns "~ Unknown" when no info available', () => {
     const result = cleanSenderDisplay(null, null);
-    expect(result).toBe('Participant');
+    expect(result).toBe('~ Unknown');
   });
 
   it('skips raw identifier sender names', () => {
     const result = cleanSenderDisplay('6281380888035@s.whatsapp.net', '6281380888035@s.whatsapp.net');
-    expect(result).toBe('+6281380888035');
+    expect(result).toBe('~ +6281380888035');
   });
 });
 

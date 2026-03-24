@@ -27,6 +27,14 @@ pub struct SessionInfo {
     pub shutdown_tx: Option<oneshot::Sender<()>>,
 }
 
+/// Result from sending a media message, includes upload metadata for DB storage.
+pub struct MediaSendResult {
+    pub msg_id: String,
+    pub direct_path: String,
+    pub media_key: Vec<u8>,
+    pub file_enc_sha256: Vec<u8>,
+}
+
 /// Manages multiple WhatsApp sessions using the whatsapp-rust library.
 #[derive(Clone)]
 pub struct WhatsAppManager {
@@ -195,7 +203,7 @@ impl WhatsAppManager {
         data: Vec<u8>,
         mime_type: &str,
         caption: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<MediaSendResult, String> {
         let client = self.get_client(session_id)?;
 
         let parsed_jid: Jid = jid.parse()
@@ -204,6 +212,10 @@ impl WhatsAppManager {
         let upload = client.upload(data, wacore::download::MediaType::Image)
             .await
             .map_err(|e| format!("Failed to upload image: {}", e))?;
+
+        let direct_path = upload.direct_path.clone();
+        let media_key = upload.media_key.clone();
+        let file_enc_sha256 = upload.file_enc_sha256.clone();
 
         let msg = wa::Message {
             image_message: Some(Box::new(wa::message::ImageMessage {
@@ -225,7 +237,7 @@ impl WhatsAppManager {
             .map_err(|e| format!("Failed to send image: {}", e))?;
 
         info!(%session_id, jid, "Sent image message: {}", msg_id);
-        Ok(msg_id)
+        Ok(MediaSendResult { msg_id, direct_path, media_key, file_enc_sha256 })
     }
 
     /// Send a document message through a real WhatsApp session
@@ -236,7 +248,7 @@ impl WhatsAppManager {
         data: Vec<u8>,
         mime_type: &str,
         filename: &str,
-    ) -> Result<String, String> {
+    ) -> Result<MediaSendResult, String> {
         let client = self.get_client(session_id)?;
 
         let parsed_jid: Jid = jid.parse()
@@ -245,6 +257,10 @@ impl WhatsAppManager {
         let upload = client.upload(data, wacore::download::MediaType::Document)
             .await
             .map_err(|e| format!("Failed to upload document: {}", e))?;
+
+        let direct_path = upload.direct_path.clone();
+        let media_key = upload.media_key.clone();
+        let file_enc_sha256 = upload.file_enc_sha256.clone();
 
         let msg = wa::Message {
             document_message: Some(Box::new(wa::message::DocumentMessage {
@@ -266,7 +282,7 @@ impl WhatsAppManager {
             .map_err(|e| format!("Failed to send document: {}", e))?;
 
         info!(%session_id, jid, "Sent document message: {}", msg_id);
-        Ok(msg_id)
+        Ok(MediaSendResult { msg_id, direct_path, media_key, file_enc_sha256 })
     }
 
     /// Send an audio message through a real WhatsApp session
@@ -276,7 +292,7 @@ impl WhatsAppManager {
         jid: &str,
         data: Vec<u8>,
         ptt: bool,
-    ) -> Result<String, String> {
+    ) -> Result<MediaSendResult, String> {
         let client = self.get_client(session_id)?;
 
         let parsed_jid: Jid = jid.parse()
@@ -285,6 +301,10 @@ impl WhatsAppManager {
         let upload = client.upload(data, wacore::download::MediaType::Audio)
             .await
             .map_err(|e| format!("Failed to upload audio: {}", e))?;
+
+        let direct_path = upload.direct_path.clone();
+        let media_key = upload.media_key.clone();
+        let file_enc_sha256 = upload.file_enc_sha256.clone();
 
         let msg = wa::Message {
             audio_message: Some(Box::new(wa::message::AudioMessage {
@@ -306,7 +326,7 @@ impl WhatsAppManager {
             .map_err(|e| format!("Failed to send audio: {}", e))?;
 
         info!(%session_id, jid, "Sent audio message: {}", msg_id);
-        Ok(msg_id)
+        Ok(MediaSendResult { msg_id, direct_path, media_key, file_enc_sha256 })
     }
 
     /// Trigger a history sync re-request
@@ -331,8 +351,16 @@ impl WhatsAppManager {
         // Construct the appropriate protobuf message type to satisfy the Downloadable trait.
         // Each message type (Image, Video, etc.) implements Downloadable with its own MediaType.
         let downloadable: Box<dyn wacore::download::Downloadable> = match media_type {
-            wacore::download::MediaType::Image | wacore::download::MediaType::Sticker => {
+            wacore::download::MediaType::Image => {
                 Box::new(waproto::whatsapp::message::ImageMessage {
+                    direct_path: Some(direct_path.to_string()),
+                    media_key: Some(media_key.to_vec()),
+                    file_enc_sha256: Some(file_enc_sha256.to_vec()),
+                    ..Default::default()
+                })
+            }
+            wacore::download::MediaType::Sticker => {
+                Box::new(waproto::whatsapp::message::StickerMessage {
                     direct_path: Some(direct_path.to_string()),
                     media_key: Some(media_key.to_vec()),
                     file_enc_sha256: Some(file_enc_sha256.to_vec()),

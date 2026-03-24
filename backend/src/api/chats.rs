@@ -14,6 +14,7 @@ use crate::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(list_chats))
+        .route("/contacts", get(list_contacts))
         .route("/:chat_id/messages", get(list_messages))
         .route("/:chat_id/messages/:message_id/media", get(get_media))
         .route("/:chat_id/send", post(send_message))
@@ -68,6 +69,27 @@ async fn list_chats(
     })?;
 
     Ok(Json(serde_json::json!({ "chats": chats })))
+}
+
+async fn list_contacts(
+    State(state): State<AppState>,
+    _auth: AuthUser,
+    Query(query): Query<ContactsQuery>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    let contacts = sqlx::query_as::<_, Contact>(
+        "SELECT * FROM contacts WHERE ($1::uuid IS NULL OR session_id = $1) ORDER BY push_name ASC NULLS LAST",
+    )
+    .bind(query.session_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({ "contacts": contacts })))
 }
 
 async fn list_messages(
@@ -190,7 +212,7 @@ async fn get_media(
         MessageType::Video => wacore::download::MediaType::Video,
         MessageType::Audio => wacore::download::MediaType::Audio,
         MessageType::Document => wacore::download::MediaType::Document,
-        MessageType::Sticker => wacore::download::MediaType::Image,
+        MessageType::Sticker => wacore::download::MediaType::Sticker,
         _ => wacore::download::MediaType::Document,
     };
 
@@ -399,8 +421,8 @@ async fn send_media_message(
     // Determine message type and send
     let is_image = media_type.as_deref() == Some("image")
         || mime.starts_with("image/");
-    let (msg_type_str, msg_id) = if is_image {
-        let msg_id = state
+    let result = if is_image {
+        state
             .wa_manager
             .send_image_message(chat.session_id, &chat.chat_jid, file_data, &mime, caption.as_deref())
             .await
@@ -409,11 +431,10 @@ async fn send_media_message(
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({ "error": e.to_string() })),
                 )
-            })?;
-        ("image", msg_id)
+            })?
     } else {
         let fname = file_name.clone().unwrap_or_else(|| "file".to_string());
-        let msg_id = state
+        state
             .wa_manager
             .send_document_message(chat.session_id, &chat.chat_jid, file_data, &mime, &fname)
             .await
@@ -422,9 +443,10 @@ async fn send_media_message(
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({ "error": e.to_string() })),
                 )
-            })?;
-        ("document", msg_id)
+            })?
     };
+
+    let msg_type_str = if is_image { "image" } else { "document" };
 
     // Save to DB
     let display_content = caption.clone().unwrap_or_else(|| {
@@ -432,18 +454,21 @@ async fn send_media_message(
     });
 
     let message = sqlx::query_as::<_, Message>(
-        "INSERT INTO messages (id, chat_id, message_id, sender, sender_name, content, message_type, media_mime_type, media_filename, status, is_from_me, timestamp)
-         VALUES ($1, $2, $3, $4, $5, $6, $7::message_type, $8, $9, 'sent', true, NOW()) RETURNING *",
+        "INSERT INTO messages (id, chat_id, message_id, sender, sender_name, content, message_type, media_mime_type, media_filename, direct_path, media_key, file_enc_sha256, status, is_from_me, timestamp)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::message_type, $8, $9, $10, $11, $12, 'sent', true, NOW()) RETURNING *",
     )
     .bind(Uuid::new_v4())
     .bind(chat_id)
-    .bind(&msg_id)
+    .bind(&result.msg_id)
     .bind(&auth.username)
     .bind(&auth.username)
     .bind(&display_content)
     .bind(msg_type_str)
     .bind(&mime)
     .bind(&file_name)
+    .bind(&result.direct_path)
+    .bind(&result.media_key)
+    .bind(&result.file_enc_sha256)
     .fetch_one(&state.db)
     .await
     .map_err(|e| {

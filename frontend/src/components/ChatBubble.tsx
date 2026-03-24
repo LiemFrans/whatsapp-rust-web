@@ -12,6 +12,7 @@ import {
   MoreVertical,
 } from 'lucide-react';
 import type { Message } from '@/types';
+import type { ContactsMap } from '@/store/chatStore';
 import { cleanSenderDisplay, formatMentions } from '@/utils/chat';
 import { chatApi } from '@/services/api';
 
@@ -19,12 +20,13 @@ interface ChatBubbleProps {
   message: Message;
   chatId: string;
   showSender?: boolean;
+  contacts?: ContactsMap;
   onReply?: (message: Message) => void;
   onForward?: (message: Message) => void;
   onStar?: (messageId: string) => void;
 }
 
-export default function ChatBubble({ message, chatId, showSender, onReply, onForward, onStar }: ChatBubbleProps) {
+export default function ChatBubble({ message, chatId, showSender, contacts, onReply, onForward, onStar }: ChatBubbleProps) {
   const isMe = message.is_from_me;
   const parsedDate = new Date(message.timestamp);
   const time = isNaN(parsedDate.getTime())
@@ -78,7 +80,7 @@ export default function ChatBubble({ message, chatId, showSender, onReply, onFor
               }}
             />
             {message.content && (
-              <p className="mt-1 whitespace-pre-wrap text-sm">{formatMentions(message.content)}</p>
+              <p className="mt-1 whitespace-pre-wrap text-sm">{formatMentions(message.content, contacts)}</p>
             )}
           </div>
         );
@@ -90,7 +92,7 @@ export default function ChatBubble({ message, chatId, showSender, onReply, onFor
               <video src={mediaProxyUrl} className="w-full" controls preload="metadata" />
             </div>
             {message.content && (
-              <p className="mt-1 whitespace-pre-wrap text-sm">{formatMentions(message.content)}</p>
+              <p className="mt-1 whitespace-pre-wrap text-sm">{formatMentions(message.content, contacts)}</p>
             )}
           </div>
         );
@@ -128,7 +130,7 @@ export default function ChatBubble({ message, chatId, showSender, onReply, onFor
               <MapPin size={36} className="text-wa-green" />
             </div>
             {message.content && (
-              <p className="mt-1 whitespace-pre-wrap text-sm">{formatMentions(message.content)}</p>
+              <p className="mt-1 whitespace-pre-wrap text-sm">{formatMentions(message.content, contacts)}</p>
             )}
           </div>
         );
@@ -140,7 +142,7 @@ export default function ChatBubble({ message, chatId, showSender, onReply, onFor
               ⚠️ Unsupported message type
             </p>
             {message.content && (
-              <p className="mt-1 whitespace-pre-wrap text-sm">{formatMentions(message.content)}</p>
+              <p className="mt-1 whitespace-pre-wrap text-sm">{formatMentions(message.content, contacts)}</p>
             )}
           </div>
         );
@@ -161,8 +163,8 @@ export default function ChatBubble({ message, chatId, showSender, onReply, onFor
       case 'text':
       default:
         return (
-          <p className="whitespace-pre-wrap text-sm leading-relaxed">
-            {message.content ? formatMentions(message.content) : ''}
+          <p className="break-words whitespace-pre-wrap text-sm leading-relaxed">
+            {message.content ? formatMentions(message.content, contacts) : ''}
           </p>
         );
     }
@@ -181,18 +183,18 @@ export default function ChatBubble({ message, chatId, showSender, onReply, onFor
   return (
     <div className={`group flex ${isMe ? 'justify-end' : 'justify-start'} px-4 py-0.5`}>
       <div
-        className={`relative max-w-[65%] rounded-lg px-3 py-1.5 shadow-sm ${
+        className={`relative max-w-[65%] px-3 py-1.5 shadow-sm ${
           isMe
             ? 'bg-wa-bubble-out text-gray-900 dark:bg-wa-dark-bubble-out dark:text-gray-100'
             : 'bg-white text-gray-900 dark:bg-wa-dark-bubble-in dark:text-gray-100'
-        } ${isMe ? 'bubble-tail-right' : 'bubble-tail-left'}`}
+        } ${isMe ? 'rounded-2xl rounded-tr-md bubble-tail-right' : 'rounded-2xl rounded-tl-md bubble-tail-left'}`}
       >
         {/* Reply reference / Quoted message */}
         {(message.reply_to_message_id || message.reply_to) && (
           <div className="mb-1 cursor-pointer rounded border-l-4 border-wa-green bg-black/5 px-2 py-1 dark:bg-white/5">
             {(message.quote_sender_name || message.quote_sender) && (
               <p className="truncate text-xs font-semibold text-wa-green">
-                {message.quote_sender_name || cleanSenderDisplay(null, message.quote_sender)}
+                {message.quote_sender_name || cleanSenderDisplay(null, message.quote_sender, contacts)}
               </p>
             )}
             {message.quote_content ? (
@@ -213,8 +215,10 @@ export default function ChatBubble({ message, chatId, showSender, onReply, onFor
         )}
 
         {/* Sender name (groups) */}
-        {showSender && !isMe && (
-          <p className="mb-0.5 text-xs font-semibold text-wa-green">{cleanSenderDisplay(message.sender_name, message.sender)}</p>
+        {showSender && (
+          <p className="mb-0.5 text-xs font-semibold text-wa-green">
+            {isMe ? '~ You' : cleanSenderDisplay(message.sender_name, message.sender, contacts)}
+          </p>
         )}
 
         {/* Starred indicator */}

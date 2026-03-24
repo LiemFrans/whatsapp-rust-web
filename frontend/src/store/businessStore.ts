@@ -21,6 +21,7 @@ interface BusinessState {
   createTicket: (data: Record<string, unknown>) => Promise<void>;
   fetchAnalytics: () => Promise<void>;
   fetchQuickReplies: () => Promise<void>;
+  createQuickReply: (data: Record<string, unknown>) => Promise<void>;
   fetchAgents: () => Promise<void>;
   setActiveTab: (tab: 'queue' | 'my-chats' | 'resolved') => void;
 }
@@ -118,6 +119,18 @@ export const useBusinessStore = create<BusinessState>((set) => ({
       set({ quickReplies: res.data.quick_replies });
     } catch (err) {
       console.error('Failed to fetch quick replies:', err);
+    }
+  },
+
+  createQuickReply: async (data: Record<string, unknown>) => {
+    try {
+      await businessApi.quickReplies.create(data);
+      // Refresh quick replies list
+      const res = await businessApi.quickReplies.list();
+      set({ quickReplies: res.data.quick_replies });
+    } catch (err) {
+      console.error('Failed to create quick reply:', err);
+      throw err;
     }
   },
 

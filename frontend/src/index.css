@@ -47,7 +47,8 @@ body {
 }
 
 /* Chat bubble tails */
-.bubble-out::before {
+.bubble-out::before,
+.bubble-tail-right::before {
   content: '';
   position: absolute;
   top: 0;
@@ -57,10 +58,12 @@ body {
   border-left: 8px solid #d9fdd3;
   border-top: 8px solid transparent;
 }
-.dark .bubble-out::before {
+.dark .bubble-out::before,
+.dark .bubble-tail-right::before {
   border-left-color: #005c4b;
 }
-.bubble-in::before {
+.bubble-in::before,
+.bubble-tail-left::before {
   content: '';
   position: absolute;
   top: 0;
@@ -70,6 +73,7 @@ body {
   border-right: 8px solid #ffffff;
   border-top: 8px solid transparent;
 }
-.dark .bubble-in::before {
+.dark .bubble-in::before,
+.dark .bubble-tail-left::before {
   border-right-color: #202c33;
 }

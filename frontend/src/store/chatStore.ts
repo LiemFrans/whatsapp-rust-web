@@ -1,6 +1,9 @@
 import { create } from 'zustand';
-import type { Chat, Message, WhatsAppSession } from '@/types';
+import type { Chat, Contact, Message, WhatsAppSession } from '@/types';
 import { chatApi, sessionApi } from '@/services/api';
+
+// Contacts map: jid-user-part → { push_name, phone_number }
+export type ContactsMap = Record<string, { push_name: string | null; phone_number: string | null }>;
 
 export interface ChatState {
   sessions: WhatsAppSession[];
@@ -8,6 +11,7 @@ export interface ChatState {
   chats: Chat[];
   activeChat: Chat | null;
   messages: Record<string, Message[]>;
+  contacts: ContactsMap;
   isLoading: boolean;
   isLoadingChats: boolean;
   isLoadingMessages: boolean;
@@ -19,6 +23,8 @@ export interface ChatState {
   fetchSessions: () => Promise<void>;
   setActiveSession: (sessionId: string | null) => void;
   fetchChats: (sessionId?: string, search?: string) => Promise<void>;
+  fetchContacts: (sessionId?: string) => Promise<void>;
+  updateContact: (jid: string, pushName: string | null, phoneNumber: string | null) => void;
   setActiveChat: (chat: Chat | null) => void;
   fetchMessages: (chatId: string, cursor?: string) => Promise<void>;
   sendMessage: (chatId: string, sessionId: string, content: string, replyTo?: string) => Promise<void>;
@@ -41,6 +47,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   chats: [],
   activeChat: null,
   messages: {},
+  contacts: {},
   isLoading: false,
   isLoadingChats: false,
   isLoadingMessages: false,
@@ -76,6 +83,50 @@ export const useChatStore = create<ChatState>((set, get) => ({
       console.error('Failed to fetch chats:', err);
       set({ isLoadingChats: false });
     }
+  },
+
+  fetchContacts: async (sessionId?: string) => {
+    try {
+      const res = await chatApi.contacts({
+        session_id: sessionId || get().activeSessionId || undefined,
+      });
+      const contactsList = res.data.contacts as Contact[];
+      const map: ContactsMap = {};
+      for (const c of contactsList) {
+        // Index by full JID
+        map[c.jid] = { push_name: c.push_name, phone_number: c.phone_number };
+        // Also index by user part (strip @server) for easy lookup
+        const userPart = c.jid.split('@')[0];
+        if (userPart && userPart !== c.jid) {
+          map[userPart] = { push_name: c.push_name, phone_number: c.phone_number };
+        }
+        // Also index by user part without device suffix (e.g., "4372444528669:71" → "4372444528669")
+        const cleanUser = userPart.split(':')[0];
+        if (cleanUser && cleanUser !== userPart) {
+          map[cleanUser] = { push_name: c.push_name, phone_number: c.phone_number };
+        }
+      }
+      set({ contacts: map });
+    } catch (err) {
+      console.error('Failed to fetch contacts:', err);
+    }
+  },
+
+  updateContact: (jid: string, pushName: string | null, phoneNumber: string | null) => {
+    set((state) => {
+      const newContacts = { ...state.contacts };
+      const entry = { push_name: pushName, phone_number: phoneNumber };
+      newContacts[jid] = entry;
+      const userPart = jid.split('@')[0];
+      if (userPart && userPart !== jid) {
+        newContacts[userPart] = entry;
+      }
+      const cleanUser = userPart.split(':')[0];
+      if (cleanUser && cleanUser !== userPart) {
+        newContacts[cleanUser] = entry;
+      }
+      return { contacts: newContacts };
+    });
   },
 
   setActiveChat: (chat) => {
