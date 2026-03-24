@@ -120,6 +120,9 @@ CREATE TABLE messages (
     media_mime_type VARCHAR(100),
     media_size BIGINT,
     media_filename VARCHAR(500),
+    media_key BYTEA,
+    direct_path TEXT,
+    file_enc_sha256 BYTEA,
     thumbnail_base64 TEXT,
     status message_status NOT NULL DEFAULT 'sent',
     is_from_me BOOLEAN NOT NULL DEFAULT false,
@@ -127,6 +130,8 @@ CREATE TABLE messages (
     is_starred BOOLEAN NOT NULL DEFAULT false,
     reply_to_message_id VARCHAR(200),
     quote_content TEXT,
+    quote_sender VARCHAR(100),
+    quote_sender_name VARCHAR(255),
     timestamp TIMESTAMPTZ NOT NULL,
     edited_at TIMESTAMPTZ,
     deleted_at TIMESTAMPTZ,
@@ -140,6 +145,23 @@ CREATE INDEX idx_messages_message_id ON messages(message_id);
 CREATE INDEX idx_messages_sender ON messages(sender);
 CREATE INDEX idx_messages_type ON messages(message_type);
 CREATE INDEX idx_messages_starred ON messages(chat_id, is_starred) WHERE is_starred = true;
+
+-- ============================================================
+-- CONTACTS (Push name resolution)
+-- ============================================================
+
+CREATE TABLE contacts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id UUID NOT NULL REFERENCES whatsapp_sessions(id) ON DELETE CASCADE,
+    jid VARCHAR(100) NOT NULL,
+    push_name VARCHAR(255),
+    phone_number VARCHAR(20),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(session_id, jid)
+);
+
+CREATE INDEX idx_contacts_session ON contacts(session_id);
+CREATE INDEX idx_contacts_jid ON contacts(jid);
 
 -- ============================================================
 -- LABELS / TAGS

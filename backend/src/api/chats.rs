@@ -2,6 +2,7 @@ use axum::{
     extract::{Path, Query, State, Multipart},
     routing::{get, post},
     Json, Router,
+    response::IntoResponse,
 };
 use uuid::Uuid;
 
@@ -14,6 +15,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(list_chats))
         .route("/:chat_id/messages", get(list_messages))
+        .route("/:chat_id/messages/:message_id/media", get(get_media))
         .route("/:chat_id/send", post(send_message))
         .route("/:chat_id/send-media", post(send_media_message))
         .route("/:chat_id/read", post(mark_as_read))
@@ -123,6 +125,108 @@ async fn list_messages(
     })))
 }
 
+/// Proxy endpoint to download and serve WhatsApp media
+/// The media is encrypted on WhatsApp CDN and needs decryption keys from DB
+async fn get_media(
+    State(state): State<AppState>,
+    _auth: AuthUser,
+    Path((chat_id, message_id)): Path<(Uuid, Uuid)>,
+) -> Result<impl IntoResponse, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    // Get message with media info
+    let msg = sqlx::query_as::<_, Message>("SELECT * FROM messages WHERE id = $1 AND chat_id = $2")
+        .bind(message_id)
+        .bind(chat_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "Message not found" })),
+            )
+        })?;
+
+    // Get the chat to find session_id
+    let chat = sqlx::query_as::<_, crate::models::chat::Chat>("SELECT * FROM chats WHERE id = $1")
+        .bind(chat_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "Chat not found" })),
+            )
+        })?;
+
+    // We need direct_path, media_key, file_enc_sha256 to download
+    let direct_path = msg.direct_path.ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "No media download info available" })),
+        )
+    })?;
+    let media_key = msg.media_key.ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "No media key available" })),
+        )
+    })?;
+    let file_enc_sha256 = msg.file_enc_sha256.unwrap_or_default();
+
+    // Determine media type for decryption
+    let media_type = match msg.message_type {
+        MessageType::Image => wacore::download::MediaType::Image,
+        MessageType::Video => wacore::download::MediaType::Video,
+        MessageType::Audio => wacore::download::MediaType::Audio,
+        MessageType::Document => wacore::download::MediaType::Document,
+        MessageType::Sticker => wacore::download::MediaType::Image,
+        _ => wacore::download::MediaType::Document,
+    };
+
+    // Download media via WhatsApp manager
+    let data = state
+        .wa_manager
+        .download_media(chat.session_id, &direct_path, &media_key, &file_enc_sha256, media_type)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+        })?;
+
+    let content_type = msg.media_mime_type.unwrap_or_else(|| "application/octet-stream".to_string());
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        content_type.parse().unwrap_or_else(|_| "application/octet-stream".parse().unwrap()),
+    );
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        "public, max-age=86400".parse().unwrap(),
+    );
+    if let Some(filename) = &msg.media_filename {
+        headers.insert(
+            axum::http::header::CONTENT_DISPOSITION,
+            format!("inline; filename=\"{}\"", filename).parse().unwrap_or_else(|_| "inline".parse().unwrap()),
+        );
+    }
+
+    Ok((headers, data))
+}
+
 async fn send_message(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -147,12 +251,40 @@ async fn send_message(
             )
         })?;
 
-    // Send via WhatsApp
-    let msg_id = state
-        .wa_manager
-        .send_text_message(chat.session_id, &chat.chat_jid, &req.content)
-        .await
-        .map_err(|e| {
+    // Send via WhatsApp (with reply context if provided)
+    let reply_to = req.reply_to.as_deref();
+    let msg_id = if reply_to.is_some() {
+        // Look up the original message's sender for reply context
+        let reply_sender = if let Some(reply_msg_id) = reply_to {
+            sqlx::query_as::<_, (String,)>(
+                "SELECT sender FROM messages WHERE message_id = $1 AND chat_id = $2 LIMIT 1"
+            )
+            .bind(reply_msg_id)
+            .bind(chat_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .map(|(s,)| s)
+        } else {
+            None
+        };
+        state
+            .wa_manager
+            .send_text_message_with_reply(
+                chat.session_id,
+                &chat.chat_jid,
+                &req.content,
+                reply_to,
+                reply_sender.as_deref(),
+            )
+            .await
+    } else {
+        state
+            .wa_manager
+            .send_text_message(chat.session_id, &chat.chat_jid, &req.content)
+            .await
+    }.map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": e.to_string() })),
@@ -161,8 +293,8 @@ async fn send_message(
 
     // Save to DB
     let message = sqlx::query_as::<_, Message>(
-        "INSERT INTO messages (id, chat_id, message_id, sender, sender_name, content, message_type, status, is_from_me, timestamp)
-         VALUES ($1, $2, $3, $4, $5, $6, 'text', 'sent', true, NOW()) RETURNING *",
+        "INSERT INTO messages (id, chat_id, message_id, sender, sender_name, content, message_type, status, is_from_me, reply_to_message_id, timestamp)
+         VALUES ($1, $2, $3, $4, $5, $6, 'text', 'sent', true, $7, NOW()) RETURNING *",
     )
     .bind(Uuid::new_v4())
     .bind(chat_id)
@@ -170,6 +302,7 @@ async fn send_message(
     .bind(&auth.username)
     .bind(&auth.username)
     .bind(&req.content)
+    .bind(reply_to)
     .fetch_one(&state.db)
     .await
     .map_err(|e| {

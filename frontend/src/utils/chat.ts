@@ -2,17 +2,27 @@ import type { Chat } from '@/types';
 
 /**
  * Get a clean display name for a chat.
+ * Shows "Name (+phone)" when both are available, like WhatsApp Web.
  * Falls back gracefully from name → phone_number → cleaned JID.
  */
 export function getChatDisplayName(chat: Chat): string {
+  const hasName = chat.name && !isRawIdentifier(chat.name);
+  const hasPhone = chat.phone_number && chat.phone_number.trim() !== '';
+
+  // Show "Name (+phone)" when both are available
+  if (hasName && hasPhone) {
+    const phone = chat.phone_number!.startsWith('+') ? chat.phone_number! : `+${chat.phone_number!}`;
+    return `${chat.name} (${phone})`;
+  }
+
   // Use the name if it's not a raw JID/LID identifier
-  if (chat.name && !isRawIdentifier(chat.name)) {
-    return chat.name;
+  if (hasName) {
+    return chat.name!;
   }
 
   // Use phone number if available
-  if (chat.phone_number) {
-    return chat.phone_number;
+  if (hasPhone) {
+    return chat.phone_number!.startsWith('+') ? chat.phone_number! : `+${chat.phone_number!}`;
   }
 
   // Clean up the JID for display
@@ -21,12 +31,18 @@ export function getChatDisplayName(chat: Chat): string {
 
 /**
  * Clean a sender JID/name for display in group chat bubbles.
- * Prefers sender_name, falls back to cleaned sender JID, then phone-like format.
+ * Shows "~ Name" like WhatsApp Web when a push name is available.
+ * Falls back to cleaned sender JID, then phone-like format.
  */
 export function cleanSenderDisplay(senderName?: string | null, sender?: string | null): string {
   // Use sender_name if it's a real name (not a raw identifier)
   if (senderName && !isRawIdentifier(senderName)) {
-    return senderName;
+    // Extract phone from sender JID if available
+    const phone = extractPhoneFromJid(sender);
+    if (phone) {
+      return `~ ${senderName} (+${phone})`;
+    }
+    return `~ ${senderName}`;
   }
 
   // If sender is empty/missing, use sender_name if we have one, else "Participant"
@@ -102,4 +118,17 @@ function cleanJidForDisplay(jid: string, isGroup: boolean): string {
   }
 
   return userPart;
+}
+
+/**
+ * Extract phone number from a JID (e.g., "6281380888035@s.whatsapp.net" → "6281380888035")
+ */
+function extractPhoneFromJid(jid?: string | null): string | null {
+  if (!jid) return null;
+  const userPart = jid.split('@')[0];
+  const cleanUser = userPart.split(':')[0];
+  if (/^\d{10,15}$/.test(cleanUser)) {
+    return cleanUser;
+  }
+  return null;
 }

@@ -92,10 +92,10 @@ export default function PersonalMode() {
   const handleSendMessage = useCallback(
     (content: string) => {
       if (!selectedChatId || !sessions[0]) return;
-      sendMessage(selectedChatId, sessions[0].id, content);
+      sendMessage(selectedChatId, sessions[0].id, content, replyTo?.message_id ?? undefined);
       setReplyTo(null);
     },
-    [selectedChatId, sessions, sendMessage]
+    [selectedChatId, sessions, sendMessage, replyTo]
   );
 
   const handleSendMedia = useCallback(
@@ -213,6 +213,7 @@ export default function PersonalMode() {
                     <ChatBubble
                       key={msg.id}
                       message={msg}
+                      chatId={selectedChatId!}
                       showSender={selectedChat.is_group}
                       onReply={setReplyTo}
                     />

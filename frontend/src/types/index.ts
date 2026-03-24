@@ -94,6 +94,8 @@ export interface Message {
   reply_to_message_id: string | null;
   reply_to: string | null;
   quote_content: string | null;
+  quote_sender: string | null;
+  quote_sender_name: string | null;
   is_deleted: boolean;
   timestamp: string;
   edited_at: string | null;

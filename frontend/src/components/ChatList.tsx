@@ -147,7 +147,7 @@ function ChatListItem({
       {/* Content */}
       <div className="min-w-0 flex-1">
         <div className="flex items-center justify-between gap-2">
-          <h3 className="truncate text-sm font-medium text-gray-900 dark:text-white">
+          <h3 className="text-sm font-medium text-gray-900 dark:text-white break-words leading-tight">
             {getChatDisplayName(chat)}
           </h3>
           <span className="shrink-0 text-xs text-gray-500">{lastMsgTime}</span>

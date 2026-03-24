@@ -141,14 +141,42 @@ impl WhatsAppManager {
         jid: &str,
         text: &str,
     ) -> Result<String, String> {
+        self.send_text_message_with_reply(session_id, jid, text, None, None).await
+    }
+
+    /// Send a text message with optional reply context through a real WhatsApp session
+    pub async fn send_text_message_with_reply(
+        &self,
+        session_id: Uuid,
+        jid: &str,
+        text: &str,
+        reply_to_message_id: Option<&str>,
+        reply_to_sender: Option<&str>,
+    ) -> Result<String, String> {
         let client = self.get_client(session_id)?;
 
         let parsed_jid: Jid = jid.parse()
             .map_err(|e| format!("Invalid JID '{}': {}", jid, e))?;
 
-        let msg = wa::Message {
-            conversation: Some(text.to_string()),
-            ..Default::default()
+        let msg = if let Some(stanza_id) = reply_to_message_id {
+            // Build message with context_info for reply
+            wa::Message {
+                extended_text_message: Some(Box::new(wa::message::ExtendedTextMessage {
+                    text: Some(text.to_string()),
+                    context_info: Some(Box::new(wa::ContextInfo {
+                        stanza_id: Some(stanza_id.to_string()),
+                        participant: reply_to_sender.map(|s| s.to_string()),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }
+        } else {
+            wa::Message {
+                conversation: Some(text.to_string()),
+                ..Default::default()
+            }
         };
 
         let msg_id = client.send_message(parsed_jid, msg)
@@ -287,6 +315,62 @@ impl WhatsAppManager {
         // History sync happens automatically on connection.
         info!(%session_id, "History sync triggered (automatic on connection)");
         Ok(())
+    }
+
+    /// Download and decrypt media from WhatsApp CDN
+    pub async fn download_media(
+        &self,
+        session_id: Uuid,
+        direct_path: &str,
+        media_key: &[u8],
+        file_enc_sha256: &[u8],
+        media_type: wacore::download::MediaType,
+    ) -> Result<Vec<u8>, String> {
+        let client = self.get_client(session_id)?;
+
+        // Construct the appropriate protobuf message type to satisfy the Downloadable trait.
+        // Each message type (Image, Video, etc.) implements Downloadable with its own MediaType.
+        let downloadable: Box<dyn wacore::download::Downloadable> = match media_type {
+            wacore::download::MediaType::Image | wacore::download::MediaType::Sticker => {
+                Box::new(waproto::whatsapp::message::ImageMessage {
+                    direct_path: Some(direct_path.to_string()),
+                    media_key: Some(media_key.to_vec()),
+                    file_enc_sha256: Some(file_enc_sha256.to_vec()),
+                    ..Default::default()
+                })
+            }
+            wacore::download::MediaType::Video => {
+                Box::new(waproto::whatsapp::message::VideoMessage {
+                    direct_path: Some(direct_path.to_string()),
+                    media_key: Some(media_key.to_vec()),
+                    file_enc_sha256: Some(file_enc_sha256.to_vec()),
+                    ..Default::default()
+                })
+            }
+            wacore::download::MediaType::Audio => {
+                Box::new(waproto::whatsapp::message::AudioMessage {
+                    direct_path: Some(direct_path.to_string()),
+                    media_key: Some(media_key.to_vec()),
+                    file_enc_sha256: Some(file_enc_sha256.to_vec()),
+                    ..Default::default()
+                })
+            }
+            _ => {
+                Box::new(waproto::whatsapp::message::DocumentMessage {
+                    direct_path: Some(direct_path.to_string()),
+                    media_key: Some(media_key.to_vec()),
+                    file_enc_sha256: Some(file_enc_sha256.to_vec()),
+                    ..Default::default()
+                })
+            }
+        };
+
+        let data = client.download(downloadable.as_ref())
+            .await
+            .map_err(|e| format!("Failed to download media: {}", e))?;
+
+        info!(%session_id, bytes = data.len(), "Downloaded media");
+        Ok(data)
     }
 
     /// Get the Arc<Client> for a running session

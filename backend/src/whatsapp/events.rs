@@ -138,11 +138,11 @@ pub async fn handle_event(
             let timestamp = msg_info.timestamp;
 
             // Determine message type and content
-            let (msg_type, content, media_mime, media_url, media_filename) = extract_message_info(&msg);
+            let info = extract_message_info(&msg);
 
             debug!(
                 %session_id, %chat_jid, %sender_jid, %message_id,
-                msg_type = %msg_type, is_from_me, "Incoming message"
+                msg_type = %info.msg_type, is_from_me, "Incoming message"
             );
 
             // Upsert the chat
@@ -159,12 +159,12 @@ pub async fn handle_event(
             };
 
             // Build display text for chat's last_message (include type label for media)
-            let display_msg = content.clone().or_else(|| {
-                Some(match msg_type.as_str() {
+            let display_msg = info.content.clone().or_else(|| {
+                Some(match info.msg_type.as_str() {
                     "image" => "📷 Photo".to_string(),
                     "video" => "🎥 Video".to_string(),
                     "audio" => "🎵 Audio".to_string(),
-                    "document" => format!("📄 {}", media_filename.as_deref().unwrap_or("Document")),
+                    "document" => format!("📄 {}", info.media_filename.as_deref().unwrap_or("Document")),
                     "sticker" => "🏷️ Sticker".to_string(),
                     "location" => "📍 Location".to_string(),
                     "contact" => "👤 Contact".to_string(),
@@ -197,6 +197,19 @@ pub async fn handle_event(
                 .bind(&msg_info.push_name)
                 .execute(db)
                 .await;
+
+                // Upsert contacts table for push name resolution
+                let _ = sqlx::query(
+                    "INSERT INTO contacts (id, session_id, jid, push_name, updated_at)
+                     VALUES ($1, $2, $3, $4, NOW())
+                     ON CONFLICT (session_id, jid) DO UPDATE SET push_name = EXCLUDED.push_name, updated_at = NOW()"
+                )
+                .bind(Uuid::new_v4())
+                .bind(session_id)
+                .bind(&sender_jid)
+                .bind(&msg_info.push_name)
+                .execute(db)
+                .await;
             }
 
             // Insert the message
@@ -208,8 +221,8 @@ pub async fn handle_event(
             let msg_uuid = Uuid::new_v4();
 
             let insert_result = sqlx::query(
-                "INSERT INTO messages (id, chat_id, message_id, sender, sender_name, content, message_type, media_url, media_mime_type, media_filename, status, is_from_me, timestamp)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7::message_type, $8, $9, $10, 'delivered', $11, $12)
+                "INSERT INTO messages (id, chat_id, message_id, sender, sender_name, content, message_type, media_url, media_mime_type, media_filename, media_key, direct_path, file_enc_sha256, status, is_from_me, is_forwarded, reply_to_message_id, quote_content, quote_sender, timestamp)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7::message_type, $8, $9, $10, $11, $12, $13, 'delivered', $14, $15, $16, $17, $18, $19)
                  ON CONFLICT (chat_id, message_id) DO NOTHING"
             )
             .bind(msg_uuid)
@@ -217,12 +230,19 @@ pub async fn handle_event(
             .bind(&message_id)
             .bind(&sender_jid)
             .bind(&sender_name)
-            .bind(&content)
-            .bind(&msg_type)
-            .bind(&media_url)
-            .bind(&media_mime)
-            .bind(&media_filename)
+            .bind(&info.content)
+            .bind(&info.msg_type)
+            .bind(&info.media_url)
+            .bind(&info.media_mime)
+            .bind(&info.media_filename)
+            .bind(&info.media_key)
+            .bind(&info.direct_path)
+            .bind(&info.file_enc_sha256)
             .bind(is_from_me)
+            .bind(info.is_forwarded)
+            .bind(&info.reply_to_message_id)
+            .bind(&info.quote_content)
+            .bind(&info.quote_sender)
             .bind(timestamp)
             .execute(db)
             .await;
@@ -253,13 +273,17 @@ pub async fn handle_event(
                         "message_id": message_id,
                         "sender": sender_jid,
                         "sender_name": sender_name,
-                        "content": content,
-                        "message_type": msg_type,
-                        "media_url": media_url,
-                        "media_mime_type": media_mime,
-                        "media_filename": media_filename,
+                        "content": info.content,
+                        "message_type": info.msg_type,
+                        "media_url": info.media_url,
+                        "media_mime_type": info.media_mime,
+                        "media_filename": info.media_filename,
                         "status": "delivered",
                         "is_from_me": is_from_me,
+                        "is_forwarded": info.is_forwarded,
+                        "reply_to_message_id": info.reply_to_message_id,
+                        "quote_content": info.quote_content,
+                        "quote_sender": info.quote_sender,
                         "timestamp": timestamp.to_rfc3339(),
                     }
                 }
@@ -375,16 +399,21 @@ pub async fn handle_event(
                     .unwrap_or_else(chrono::Utc::now);
 
                 // Extract message content
-                let (msg_type, content, media_mime, media_url, media_filename) =
+                let info =
                     if let Some(msg) = &web_msg_info.message {
                         extract_message_info(msg)
                     } else {
-                        ("text".to_string(), None, None, None, None)
+                        MessageInfo {
+                            msg_type: "text".to_string(), content: None, media_mime: None,
+                            media_url: None, media_filename: None, media_key: None,
+                            direct_path: None, file_enc_sha256: None, is_forwarded: false,
+                            reply_to_message_id: None, quote_content: None, quote_sender: None,
+                        }
                     };
 
                 let insert_result = sqlx::query(
-                    "INSERT INTO messages (id, chat_id, message_id, sender, sender_name, content, message_type, media_url, media_mime_type, media_filename, status, is_from_me, timestamp)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7::message_type, $8, $9, $10, 'delivered', $11, $12)
+                    "INSERT INTO messages (id, chat_id, message_id, sender, sender_name, content, message_type, media_url, media_mime_type, media_filename, media_key, direct_path, file_enc_sha256, status, is_from_me, is_forwarded, reply_to_message_id, quote_content, quote_sender, timestamp)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7::message_type, $8, $9, $10, $11, $12, $13, 'delivered', $14, $15, $16, $17, $18, $19)
                      ON CONFLICT (chat_id, message_id) DO NOTHING"
                 )
                 .bind(Uuid::new_v4())
@@ -392,12 +421,19 @@ pub async fn handle_event(
                 .bind(&wa_msg_id)
                 .bind(&sender)
                 .bind(&push_name)
-                .bind(&content)
-                .bind(&msg_type)
-                .bind(&media_url)
-                .bind(&media_mime)
-                .bind(&media_filename)
+                .bind(&info.content)
+                .bind(&info.msg_type)
+                .bind(&info.media_url)
+                .bind(&info.media_mime)
+                .bind(&info.media_filename)
+                .bind(&info.media_key)
+                .bind(&info.direct_path)
+                .bind(&info.file_enc_sha256)
                 .bind(is_from_me)
+                .bind(info.is_forwarded)
+                .bind(&info.reply_to_message_id)
+                .bind(&info.quote_content)
+                .bind(&info.quote_sender)
                 .bind(timestamp)
                 .execute(db)
                 .await;
@@ -409,16 +445,16 @@ pub async fn handle_event(
                 }
 
                 // Update chat last_message if this is the latest
-                let display_msg = content.clone().unwrap_or_else(|| {
-                    match msg_type.as_str() {
+                let display_msg = info.content.clone().unwrap_or_else(|| {
+                    match info.msg_type.as_str() {
                         "image" => "📷 Photo".to_string(),
                         "video" => "🎥 Video".to_string(),
                         "audio" => "🎵 Audio".to_string(),
-                        "document" => format!("📄 {}", media_filename.as_deref().unwrap_or("Document")),
+                        "document" => format!("📄 {}", info.media_filename.as_deref().unwrap_or("Document")),
                         "sticker" => "🏷️ Sticker".to_string(),
                         "location" => "📍 Location".to_string(),
                         "contact" => "👤 Contact".to_string(),
-                        _ => msg_type.clone(),
+                        _ => info.msg_type.clone(),
                     }
                 });
                 let _ = sqlx::query(
@@ -487,6 +523,25 @@ pub async fn handle_event(
             let new_name = &update.new_push_name;
             info!(%session_id, %jid, name = %new_name, "Push name update");
 
+            // Upsert contacts table
+            let phone = if jid.contains("@s.whatsapp.net") {
+                jid.split('@').next().map(|p| format!("+{}", p))
+            } else {
+                None
+            };
+            let _ = sqlx::query(
+                "INSERT INTO contacts (id, session_id, jid, push_name, phone_number, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, NOW())
+                 ON CONFLICT (session_id, jid) DO UPDATE SET push_name = EXCLUDED.push_name, phone_number = COALESCE(EXCLUDED.phone_number, contacts.phone_number), updated_at = NOW()"
+            )
+            .bind(Uuid::new_v4())
+            .bind(session_id)
+            .bind(&jid)
+            .bind(new_name)
+            .bind(&phone)
+            .execute(db)
+            .await;
+
             // Update chat name for exact JID match
             let result = sqlx::query(
                 "UPDATE chats SET name = $2 WHERE session_id = $1 AND chat_jid = $3 AND (name IS NULL OR name = chat_jid OR name LIKE '%@lid' OR name LIKE '+%∙%')",
@@ -547,62 +602,176 @@ pub async fn handle_event(
     }
 }
 
+/// Extracted info from a WhatsApp message
+struct MessageInfo {
+    msg_type: String,
+    content: Option<String>,
+    media_mime: Option<String>,
+    media_url: Option<String>,
+    media_filename: Option<String>,
+    media_key: Option<Vec<u8>>,
+    direct_path: Option<String>,
+    file_enc_sha256: Option<Vec<u8>>,
+    is_forwarded: bool,
+    reply_to_message_id: Option<String>,
+    quote_content: Option<String>,
+    quote_sender: Option<String>,
+}
+
+/// Helper to extract ContextInfo from various message types
+fn extract_context_info(msg: &waproto::whatsapp::Message) -> Option<&waproto::whatsapp::ContextInfo> {
+    if let Some(ext) = &msg.extended_text_message {
+        return ext.context_info.as_deref();
+    }
+    if let Some(img) = &msg.image_message {
+        return img.context_info.as_deref();
+    }
+    if let Some(vid) = &msg.video_message {
+        return vid.context_info.as_deref();
+    }
+    if let Some(audio) = &msg.audio_message {
+        return audio.context_info.as_deref();
+    }
+    if let Some(doc) = &msg.document_message {
+        return doc.context_info.as_deref();
+    }
+    if let Some(sticker) = &msg.sticker_message {
+        return sticker.context_info.as_deref();
+    }
+    if let Some(contact) = &msg.contact_message {
+        return contact.context_info.as_deref();
+    }
+    if let Some(loc) = &msg.location_message {
+        return loc.context_info.as_deref();
+    }
+    None
+}
+
 /// Extract message type and content from a WhatsApp protobuf message
 fn extract_message_info(
     msg: &waproto::whatsapp::Message,
-) -> (String, Option<String>, Option<String>, Option<String>, Option<String>) {
+) -> MessageInfo {
+    // Extract context info (reply/forward) from all message types
+    let ctx = extract_context_info(msg);
+    let is_forwarded = ctx.and_then(|c| c.is_forwarded).unwrap_or(false);
+    let reply_to_message_id = ctx.and_then(|c| c.stanza_id.clone());
+    let quote_sender = ctx.and_then(|c| c.participant.clone());
+    let quote_content = ctx.and_then(|c| {
+        c.quoted_message.as_ref().and_then(|qm| {
+            // Try to get text from quoted message
+            qm.conversation.clone()
+                .or_else(|| qm.extended_text_message.as_ref().and_then(|e| e.text.clone()))
+                .or_else(|| qm.image_message.as_ref().and_then(|i| i.caption.clone()).or(Some("📷 Photo".to_string())))
+                .or_else(|| qm.video_message.as_ref().and_then(|v| v.caption.clone()).or(Some("🎥 Video".to_string())))
+                .or_else(|| Some("📎 Media".to_string()))
+        })
+    });
+
+    let base = MessageInfo {
+        msg_type: String::new(),
+        content: None,
+        media_mime: None,
+        media_url: None,
+        media_filename: None,
+        media_key: None,
+        direct_path: None,
+        file_enc_sha256: None,
+        is_forwarded,
+        reply_to_message_id,
+        quote_content,
+        quote_sender,
+    };
+
     // Text message
     if let Some(text) = &msg.conversation {
-        return ("text".to_string(), Some(text.clone()), None, None, None);
+        return MessageInfo { msg_type: "text".to_string(), content: Some(text.clone()), ..base };
     }
 
     // Extended text message (links, quoted replies)
     if let Some(ext) = &msg.extended_text_message {
         let text = ext.text.clone();
-        return ("text".to_string(), text, None, None, None);
+        return MessageInfo { msg_type: "text".to_string(), content: text, ..base };
     }
 
     // Image message
     if let Some(img) = &msg.image_message {
-        let caption = img.caption.clone();
-        let mime = img.mimetype.clone();
-        let url = img.url.clone();
-        return ("image".to_string(), caption, mime, url, None);
+        return MessageInfo {
+            msg_type: "image".to_string(),
+            content: img.caption.clone(),
+            media_mime: img.mimetype.clone(),
+            media_url: img.url.clone(),
+            media_filename: None,
+            media_key: img.media_key.clone(),
+            direct_path: img.direct_path.clone(),
+            file_enc_sha256: img.file_enc_sha256.clone(),
+            ..base
+        };
     }
 
     // Video message
     if let Some(vid) = &msg.video_message {
-        let caption = vid.caption.clone();
-        let mime = vid.mimetype.clone();
-        let url = vid.url.clone();
-        return ("video".to_string(), caption, mime, url, None);
+        return MessageInfo {
+            msg_type: "video".to_string(),
+            content: vid.caption.clone(),
+            media_mime: vid.mimetype.clone(),
+            media_url: vid.url.clone(),
+            media_filename: None,
+            media_key: vid.media_key.clone(),
+            direct_path: vid.direct_path.clone(),
+            file_enc_sha256: vid.file_enc_sha256.clone(),
+            ..base
+        };
     }
 
     // Audio message
     if let Some(audio) = &msg.audio_message {
-        let mime = audio.mimetype.clone();
-        let url = audio.url.clone();
-        return ("audio".to_string(), None, mime, url, None);
+        return MessageInfo {
+            msg_type: "audio".to_string(),
+            content: None,
+            media_mime: audio.mimetype.clone(),
+            media_url: audio.url.clone(),
+            media_filename: None,
+            media_key: audio.media_key.clone(),
+            direct_path: audio.direct_path.clone(),
+            file_enc_sha256: audio.file_enc_sha256.clone(),
+            ..base
+        };
     }
 
     // Document message
     if let Some(doc) = &msg.document_message {
-        let filename = doc.file_name.clone();
-        let mime = doc.mimetype.clone();
-        let url = doc.url.clone();
-        let caption = doc.caption.clone();
-        return ("document".to_string(), caption, mime, url, filename);
+        return MessageInfo {
+            msg_type: "document".to_string(),
+            content: doc.caption.clone(),
+            media_mime: doc.mimetype.clone(),
+            media_url: doc.url.clone(),
+            media_filename: doc.file_name.clone(),
+            media_key: doc.media_key.clone(),
+            direct_path: doc.direct_path.clone(),
+            file_enc_sha256: doc.file_enc_sha256.clone(),
+            ..base
+        };
     }
 
     // Sticker message
-    if let Some(_sticker) = &msg.sticker_message {
-        return ("sticker".to_string(), None, Some("image/webp".to_string()), None, None);
+    if let Some(sticker) = &msg.sticker_message {
+        return MessageInfo {
+            msg_type: "sticker".to_string(),
+            content: None,
+            media_mime: Some("image/webp".to_string()),
+            media_url: sticker.url.clone(),
+            media_filename: None,
+            media_key: sticker.media_key.clone(),
+            direct_path: sticker.direct_path.clone(),
+            file_enc_sha256: sticker.file_enc_sha256.clone(),
+            ..base
+        };
     }
 
     // Contact message
     if let Some(contact) = &msg.contact_message {
         let name = contact.display_name.clone();
-        return ("contact".to_string(), name, None, None, None);
+        return MessageInfo { msg_type: "contact".to_string(), content: name, ..base };
     }
 
     // Location message
@@ -612,16 +781,16 @@ fn extract_message_info(
             loc.degrees_latitude.unwrap_or(0.0),
             loc.degrees_longitude.unwrap_or(0.0),
         ));
-        return ("location".to_string(), content, None, None, None);
+        return MessageInfo { msg_type: "location".to_string(), content, ..base };
     }
 
     // Try text_content() fallback from MessageExt
     if let Some(text) = msg.text_content() {
-        return ("text".to_string(), Some(text.to_string()), None::<String>, None, None);
+        return MessageInfo { msg_type: "text".to_string(), content: Some(text.to_string()), ..base };
     }
 
     // Unknown message type
-    ("unknown".to_string(), None, None, None, None)
+    MessageInfo { msg_type: "unknown".to_string(), ..base }
 }
 
 /// Check if a name is a "real" display name (not a raw JID/LID identifier)
@@ -694,5 +863,235 @@ async fn upsert_chat(
             error!("Failed to upsert chat {}: {}", chat_jid, e);
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── extract_message_info tests ─────────────────────────────
+
+    #[test]
+    fn test_extract_text_message() {
+        let msg = waproto::whatsapp::Message {
+            conversation: Some("Hello world".to_string()),
+            ..Default::default()
+        };
+        let info = extract_message_info(&msg);
+        assert_eq!(info.msg_type, "text");
+        assert_eq!(info.content.as_deref(), Some("Hello world"));
+        assert!(!info.is_forwarded);
+        assert!(info.reply_to_message_id.is_none());
+    }
+
+    #[test]
+    fn test_extract_extended_text_message() {
+        let msg = waproto::whatsapp::Message {
+            extended_text_message: Some(Box::new(waproto::whatsapp::message::ExtendedTextMessage {
+                text: Some("Link message".to_string()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let info = extract_message_info(&msg);
+        assert_eq!(info.msg_type, "text");
+        assert_eq!(info.content.as_deref(), Some("Link message"));
+    }
+
+    #[test]
+    fn test_extract_image_message() {
+        let msg = waproto::whatsapp::Message {
+            image_message: Some(Box::new(waproto::whatsapp::message::ImageMessage {
+                caption: Some("A photo".to_string()),
+                mimetype: Some("image/jpeg".to_string()),
+                url: Some("https://mmg.whatsapp.net/image".to_string()),
+                media_key: Some(vec![1, 2, 3]),
+                direct_path: Some("/some/path".to_string()),
+                file_enc_sha256: Some(vec![4, 5, 6]),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let info = extract_message_info(&msg);
+        assert_eq!(info.msg_type, "image");
+        assert_eq!(info.content.as_deref(), Some("A photo"));
+        assert_eq!(info.media_mime.as_deref(), Some("image/jpeg"));
+        assert_eq!(info.media_key, Some(vec![1, 2, 3]));
+        assert_eq!(info.direct_path.as_deref(), Some("/some/path"));
+        assert_eq!(info.file_enc_sha256, Some(vec![4, 5, 6]));
+    }
+
+    #[test]
+    fn test_extract_video_message() {
+        let msg = waproto::whatsapp::Message {
+            video_message: Some(Box::new(waproto::whatsapp::message::VideoMessage {
+                caption: Some("A video".to_string()),
+                mimetype: Some("video/mp4".to_string()),
+                media_key: Some(vec![7, 8, 9]),
+                direct_path: Some("/video/path".to_string()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let info = extract_message_info(&msg);
+        assert_eq!(info.msg_type, "video");
+        assert_eq!(info.content.as_deref(), Some("A video"));
+        assert_eq!(info.media_mime.as_deref(), Some("video/mp4"));
+        assert_eq!(info.media_key, Some(vec![7, 8, 9]));
+    }
+
+    #[test]
+    fn test_extract_document_message() {
+        let msg = waproto::whatsapp::Message {
+            document_message: Some(Box::new(waproto::whatsapp::message::DocumentMessage {
+                file_name: Some("report.pdf".to_string()),
+                mimetype: Some("application/pdf".to_string()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let info = extract_message_info(&msg);
+        assert_eq!(info.msg_type, "document");
+        assert_eq!(info.media_filename.as_deref(), Some("report.pdf"));
+    }
+
+    #[test]
+    fn test_extract_sticker_message() {
+        let msg = waproto::whatsapp::Message {
+            sticker_message: Some(Box::new(waproto::whatsapp::message::StickerMessage {
+                media_key: Some(vec![10, 11]),
+                direct_path: Some("/sticker/path".to_string()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let info = extract_message_info(&msg);
+        assert_eq!(info.msg_type, "sticker");
+        assert_eq!(info.media_mime.as_deref(), Some("image/webp"));
+    }
+
+    #[test]
+    fn test_extract_location_message() {
+        let msg = waproto::whatsapp::Message {
+            location_message: Some(Box::new(waproto::whatsapp::message::LocationMessage {
+                degrees_latitude: Some(-6.2088),
+                degrees_longitude: Some(106.8456),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let info = extract_message_info(&msg);
+        assert_eq!(info.msg_type, "location");
+        assert!(info.content.as_ref().unwrap().contains("-6.208800"));
+        assert!(info.content.as_ref().unwrap().contains("106.845600"));
+    }
+
+    #[test]
+    fn test_extract_unknown_message() {
+        let msg = waproto::whatsapp::Message::default();
+        let info = extract_message_info(&msg);
+        assert_eq!(info.msg_type, "unknown");
+        assert!(info.content.is_none());
+    }
+
+    // ─── Context info (reply/forward) tests ─────────────────────
+
+    #[test]
+    fn test_extract_forwarded_message() {
+        let msg = waproto::whatsapp::Message {
+            extended_text_message: Some(Box::new(waproto::whatsapp::message::ExtendedTextMessage {
+                text: Some("Forwarded text".to_string()),
+                context_info: Some(Box::new(waproto::whatsapp::ContextInfo {
+                    is_forwarded: Some(true),
+                    forwarding_score: Some(1),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let info = extract_message_info(&msg);
+        assert!(info.is_forwarded);
+        assert_eq!(info.content.as_deref(), Some("Forwarded text"));
+    }
+
+    #[test]
+    fn test_extract_reply_context() {
+        let msg = waproto::whatsapp::Message {
+            extended_text_message: Some(Box::new(waproto::whatsapp::message::ExtendedTextMessage {
+                text: Some("Reply text".to_string()),
+                context_info: Some(Box::new(waproto::whatsapp::ContextInfo {
+                    stanza_id: Some("original-msg-123".to_string()),
+                    participant: Some("sender@s.whatsapp.net".to_string()),
+                    quoted_message: Some(Box::new(waproto::whatsapp::Message {
+                        conversation: Some("Original message".to_string()),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let info = extract_message_info(&msg);
+        assert_eq!(info.reply_to_message_id.as_deref(), Some("original-msg-123"));
+        assert_eq!(info.quote_sender.as_deref(), Some("sender@s.whatsapp.net"));
+        assert_eq!(info.quote_content.as_deref(), Some("Original message"));
+    }
+
+    #[test]
+    fn test_extract_reply_to_image_shows_photo_label() {
+        let msg = waproto::whatsapp::Message {
+            extended_text_message: Some(Box::new(waproto::whatsapp::message::ExtendedTextMessage {
+                text: Some("My reply".to_string()),
+                context_info: Some(Box::new(waproto::whatsapp::ContextInfo {
+                    stanza_id: Some("img-msg-123".to_string()),
+                    quoted_message: Some(Box::new(waproto::whatsapp::Message {
+                        image_message: Some(Box::new(waproto::whatsapp::message::ImageMessage {
+                            caption: None,
+                            ..Default::default()
+                        })),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let info = extract_message_info(&msg);
+        assert_eq!(info.quote_content.as_deref(), Some("📷 Photo"));
+    }
+
+    // ─── is_meaningful_name tests ───────────────────────────────
+
+    #[test]
+    fn test_meaningful_name_real_name() {
+        assert!(is_meaningful_name("John Doe", "6281380888035@s.whatsapp.net"));
+    }
+
+    #[test]
+    fn test_meaningful_name_same_as_jid() {
+        assert!(!is_meaningful_name("6281380888035@s.whatsapp.net", "6281380888035@s.whatsapp.net"));
+    }
+
+    #[test]
+    fn test_meaningful_name_pure_digits_short() {
+        // Phone-number-length digits (10-15) are still considered "meaningful"
+        // because they could be a push name that happens to be digits
+        assert!(is_meaningful_name("6281380888035", "6281380888035@s.whatsapp.net"));
+    }
+
+    #[test]
+    fn test_meaningful_name_lid_pattern_long() {
+        // >15 digit pure numeric strings are NOT meaningful (LID numbers)
+        assert!(!is_meaningful_name("1496153703385451234", "1496153703385451234@lid"));
+    }
+
+    #[test]
+    fn test_meaningful_name_lid_jid() {
+        // LID JIDs in name are not meaningful
+        assert!(!is_meaningful_name("149615370338545@lid", "149615370338545@lid"));
     }
 }
