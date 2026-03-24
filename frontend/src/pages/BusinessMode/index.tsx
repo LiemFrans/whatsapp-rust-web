@@ -57,6 +57,7 @@ export default function BusinessMode() {
 
   const {
     queueChats,
+    myChats,
     tickets,
     analytics,
     quickReplies,
@@ -133,10 +134,14 @@ export default function BusinessMode() {
     setReplyTo(null);
   }, []);
 
+  const availableChats = [...queueChats, ...myChats, ...chats].filter(
+    (chat, index, self) => self.findIndex((item) => item.id === chat.id) === index
+  );
+
   useEffect(() => {
-    const chat = chats.find((c) => c.id === selectedChatId) || null;
+    const chat = availableChats.find((c) => c.id === selectedChatId) || null;
     setActiveChat(chat);
-  }, [selectedChatId, chats, setActiveChat]);
+  }, [selectedChatId, availableChats, setActiveChat]);
 
   const handleSendMessage = useCallback(
     (content: string) => {
@@ -181,7 +186,7 @@ export default function BusinessMode() {
     }
   };
 
-  const selectedChat = chats.find((c) => c.id === selectedChatId);
+  const selectedChat = availableChats.find((c) => c.id === selectedChatId);
   const currentMessages = selectedChatId ? (messages[selectedChatId] || []) : [];
 
   const renderPanel = () => {
@@ -203,7 +208,7 @@ export default function BusinessMode() {
               <h2 className="text-lg font-semibold text-white">My Chats</h2>
             </div>
             <ChatList
-              chats={chats}
+              chats={myChats}
               selectedChatId={selectedChatId}
               onSelectChat={handleSelectChat}
               searchQuery={searchQuery}
@@ -334,7 +339,7 @@ export default function BusinessMode() {
       {/* Create Ticket Modal */}
       {showCreateTicket && (
         <CreateTicketModal
-          chats={chats}
+          chats={availableChats}
           contacts={contacts}
           selectedChatId={selectedChatId}
           onClose={() => setShowCreateTicket(false)}
