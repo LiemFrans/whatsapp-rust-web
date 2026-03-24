@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
+use crate::models::display::{normalize_phone_number, preferred_display_name};
+
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct Chat {
     pub id: Uuid,
@@ -21,6 +23,14 @@ pub struct Chat {
     pub muted_until: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl Chat {
+    pub fn sanitized(mut self) -> Self {
+        self.phone_number = normalize_phone_number(self.phone_number.as_deref());
+        self.name = preferred_display_name(self.name.as_deref(), self.phone_number.as_deref());
+        self
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +61,14 @@ pub struct Contact {
     pub push_name: Option<String>,
     pub phone_number: Option<String>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl Contact {
+    pub fn sanitized(mut self) -> Self {
+        self.phone_number = normalize_phone_number(self.phone_number.as_deref());
+        self.push_name = preferred_display_name(self.push_name.as_deref(), self.phone_number.as_deref());
+        self
+    }
 }
 
 #[derive(Debug, Deserialize)]

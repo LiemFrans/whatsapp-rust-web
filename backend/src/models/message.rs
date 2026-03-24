@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
+use crate::models::display::{normalize_phone_number, preferred_display_name};
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "message_type", rename_all = "snake_case")]
@@ -40,6 +42,8 @@ pub struct Message {
     pub message_id: String,
     pub sender: String,
     pub sender_name: Option<String>,
+    #[sqlx(default)]
+    pub sender_phone_number: Option<String>,
     pub content: Option<String>,
     pub message_type: MessageType,
     pub media_url: Option<String>,
@@ -62,6 +66,15 @@ pub struct Message {
     pub edited_at: Option<DateTime<Utc>>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+}
+
+impl Message {
+    pub fn sanitized(mut self) -> Self {
+        self.sender_phone_number = normalize_phone_number(self.sender_phone_number.as_deref());
+        self.sender_name = preferred_display_name(self.sender_name.as_deref(), self.sender_phone_number.as_deref());
+        self.quote_sender_name = preferred_display_name(self.quote_sender_name.as_deref(), None);
+        self
+    }
 }
 
 #[derive(Debug, Deserialize)]

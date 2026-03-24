@@ -8,12 +8,12 @@ import type { ContactsMap } from '@/store/chatStore';
  */
 export function getChatDisplayName(chat: Chat, contacts?: ContactsMap): string {
   const hasName = chat.name && !isRawIdentifier(chat.name);
-  const hasPhone = chat.phone_number && chat.phone_number.trim() !== '';
+  const rawPhone = chat.phone_number?.trim().replace(/^\+/, '') || '';
+  const hasPhone = rawPhone !== '' && isLikelyRealPhone(rawPhone, chat.chat_jid);
 
-  // Show "Name (+phone)" when both are available
+  // Show "Name" only — phone is shown separately in the UI header
   if (hasName && hasPhone) {
-    const phone = chat.phone_number!.startsWith('+') ? chat.phone_number! : `+${chat.phone_number!}`;
-    return `${chat.name} (${phone})`;
+    return chat.name!;
   }
 
   // Use the name if it's not a raw JID/LID identifier
@@ -78,14 +78,28 @@ export function cleanSenderDisplay(
   // Strip device suffix (e.g., "4372444528669:71" → "4372444528669")
   const cleanUser = userPart.split(':')[0];
 
-  // If it looks like a phone number (10-15 digits), format with +
-  if (/^\d{10,15}$/.test(cleanUser)) {
+  // If it's a LID JID, try contacts for a phone number, don't show the raw LID number
+  if (sender.includes('@lid')) {
+    const phone = findPhoneForSender(sender, contacts);
+    if (phone) {
+      return `~ ${formatPhoneDisplay(phone.replace(/^\+/, ''))}`;
+    }
+    return '~ Unknown';
+  }
+
+  // If it looks like a real phone number, format with +
+  if (/^\d{10,15}$/.test(cleanUser) && isLikelyRealPhone(cleanUser, sender)) {
     return `~ +${cleanUser}`;
   }
 
   // For shorter numbers or other formats, just show as-is with prefix
-  if (/^\d+$/.test(cleanUser)) {
+  if (/^\d+$/.test(cleanUser) && cleanUser.length < 10) {
     return `~ ${cleanUser}`;
+  }
+
+  // Don't display long numeric strings that are likely internal IDs
+  if (/^\d+$/.test(cleanUser)) {
+    return '~ Unknown';
   }
 
   return cleanUser ? `~ ${cleanUser}` : '~ Unknown';
@@ -115,11 +129,22 @@ export function formatMentions(text: string, contacts?: ContactsMap): string {
       if (fromLid?.push_name) return `@${fromLid.push_name}`;
     }
 
-    // Fallback: if it looks like a phone number, show @+number
-    if (digits.length >= 10 && digits.length <= 15) {
-      return `@+${digits}`;
+    // Fallback: if it looks like a phone number (10-13 digits), show formatted
+    if (digits.length >= 10 && digits.length <= 13) {
+      return `@${formatPhoneDisplay(digits)}`;
     }
-    // Longer numbers are LID identifiers — show @User
+    // For longer numbers (LID identifiers), try contacts phone_number lookup
+    if (contacts) {
+      // Check if any contact with this LID has a phone_number
+      const lidJid2 = `${digits}@lid`;
+      const fromLid2 = contacts[lidJid2] || contacts[digits];
+      if (fromLid2?.phone_number) {
+        const raw = fromLid2.phone_number.replace(/^\+/, '');
+        if (/^\d{7,15}$/.test(raw)) {
+          return `@${formatPhoneDisplay(raw)}`;
+        }
+      }
+    }
     return `@User`;
   });
 }
@@ -133,6 +158,10 @@ export function isRawIdentifier(name: string): boolean {
   }
   // Pure long numeric strings are likely LID numbers
   if (/^\d{10,}$/.test(name)) {
+    return true;
+  }
+  // Dash-separated numeric strings are group JID user parts (e.g., "6285732931330-1606750208")
+  if (/^\d+-\d+$/.test(name)) {
     return true;
   }
   return false;
@@ -156,11 +185,6 @@ function resolveFromContacts(jid: string, contacts: ContactsMap): string | null 
     }
   }
   if (!contact?.push_name) return null;
-
-  if (contact.phone_number) {
-    const phone = contact.phone_number.startsWith('+') ? contact.phone_number : `+${contact.phone_number}`;
-    return `${contact.push_name} (${phone})`;
-  }
   return contact.push_name;
 }
 
@@ -176,12 +200,16 @@ function findPhoneForSender(sender?: string | null, contacts?: ContactsMap): str
       contacts[sender.split('@')[0]] ||
       contacts[sender.split('@')[0].split(':')[0]];
     if (contact?.phone_number) {
-      const p = contact.phone_number;
-      return p.startsWith('+') ? p : `+${p}`;
+      const raw = contact.phone_number.replace(/^\+/, '');
+      // Trust phone_number from contacts DB — it's always a real phone
+      if (/^\d{7,15}$/.test(raw)) {
+        const p = contact.phone_number;
+        return p.startsWith('+') ? p : `+${p}`;
+      }
     }
   }
 
-  // Extract from JID if it's a phone-based JID
+  // Extract from JID if it's a phone-based JID (not LID)
   const phone = extractPhoneFromJid(sender);
   if (phone) return `+${phone}`;
 
@@ -210,13 +238,145 @@ function cleanJidForDisplay(jid: string, isGroup: boolean): string {
 }
 
 /**
+ * Format a phone number for display with proper spacing, like WhatsApp Web.
+ * E.g. "6285722786222" → "+62 857-2278-6222"
+ */
+export function formatPhoneDisplay(rawPhone: string): string {
+  const digits = rawPhone.replace(/[^\d]/g, '');
+  if (digits.length < 7) return `+${digits}`;
+
+  // Detect country code length
+  let ccLen = 2; // default for most countries
+  const first = digits[0];
+  if (first === '1' || first === '7') ccLen = 1; // US/Canada, Russia/Kazakhstan
+
+  const cc = digits.slice(0, ccLen);
+  const national = digits.slice(ccLen);
+
+  // Split national number into groups of 4 from the right
+  const groups: string[] = [];
+  let i = national.length;
+  while (i > 0) {
+    const start = Math.max(0, i - 4);
+    groups.unshift(national.slice(start, i));
+    i = start;
+  }
+
+  return `+${cc} ${groups.join('-')}`;
+}
+
+/**
+ * Get structured sender information for display in group chat bubbles.
+ * Returns separate name and phone so they can be styled independently.
+ * Matches WhatsApp Web format: "~ Name    +62 857-2278-6222"
+ */
+export function getSenderDisplayInfo(
+  senderName?: string | null,
+  sender?: string | null,
+  contacts?: ContactsMap,
+  senderPhoneNumber?: string | null,
+): { displayName: string; formattedPhone: string | null } {
+  let name: string | null = null;
+  let phone: string | null = null;
+
+  // 1. Use sender_name if it's a real name
+  if (senderName && !isRawIdentifier(senderName)) {
+    name = senderName;
+  }
+
+  // 2. Use sender_phone_number from backend if available
+  if (senderPhoneNumber) {
+    const raw = senderPhoneNumber.replace(/^\+/, '');
+    if (/^\d{7,15}$/.test(raw)) {
+      phone = formatPhoneDisplay(raw);
+    }
+  }
+
+  // 3. Try contacts lookup for both name and phone
+  if (sender && contacts) {
+    const userPart = sender.split('@')[0];
+    const cleanUser = userPart.split(':')[0];
+    const contact = contacts[sender] || contacts[userPart] || contacts[cleanUser];
+
+    if (contact) {
+      if (!name && contact.push_name) {
+        name = contact.push_name;
+      }
+      if (!phone && contact.phone_number) {
+        const raw = contact.phone_number.replace(/^\+/, '');
+        // Trust phone_number from contacts DB — it's always a real phone,
+        // regardless of whether the JID is @lid or @s.whatsapp.net
+        if (/^\d{7,15}$/.test(raw)) {
+          phone = formatPhoneDisplay(raw);
+        }
+      }
+    }
+  }
+
+  // 3. Try to extract phone from sender JID (only works for @s.whatsapp.net)
+  if (!phone && sender) {
+    const extracted = extractPhoneFromJid(sender);
+    if (extracted) {
+      phone = formatPhoneDisplay(extracted);
+    }
+  }
+
+  // 4. Determine display name fallbacks
+  if (!name) {
+    if (sender === 'me') {
+      name = 'You';
+    } else if (phone) {
+      // No name but have phone — phone becomes the display name (like WhatsApp Web)
+      name = phone;
+      phone = null;
+    } else if (sender) {
+      // Last resort: extract whatever phone-like number we can from the JID
+      const userPart = sender.split('@')[0].split(':')[0];
+      if (/^\d{10,15}$/.test(userPart)) {
+        name = formatPhoneDisplay(userPart);
+      } else {
+        name = 'Unknown';
+      }
+    } else {
+      name = 'Unknown';
+    }
+  }
+
+  return { displayName: name, formattedPhone: phone };
+}
+
+/**
+ * Check if a number string is likely a real phone number vs a WhatsApp LID.
+ * Real phone numbers are typically 10-15 digits.
+ * LID numbers are internal WhatsApp identifiers that can overlap in length.
+ * We use context (JID domain) when available, otherwise reject very long numbers.
+ */
+export function isLikelyRealPhone(number: string, jid?: string | null): boolean {
+  // If we have the JID context, only phone-based JIDs have real phone numbers
+  if (jid) {
+    // @lid JIDs are never real phone numbers
+    if (jid.includes('@lid')) return false;
+    // @s.whatsapp.net are phone-based
+    if (jid.includes('@s.whatsapp.net')) return true;
+    // @g.us are group JIDs, not phone numbers
+    if (jid.includes('@g.us')) return false;
+  }
+  // Without JID context, use a stricter phone number check (max 13 digits)
+  // Most real international phone numbers are 10-13 digits
+  return /^\d{10,13}$/.test(number);
+}
+
+/**
  * Extract phone number from a JID (e.g., "6281380888035@s.whatsapp.net" → "6281380888035")
+ * Only extracts from phone-based JIDs (@s.whatsapp.net), NOT from LID JIDs (@lid).
  */
 function extractPhoneFromJid(jid?: string | null): string | null {
   if (!jid) return null;
+  // Only extract from phone-based JIDs
+  if (jid.includes('@lid') || jid.includes('@g.us')) return null;
   const userPart = jid.split('@')[0];
   const cleanUser = userPart.split(':')[0];
-  if (/^\d{10,15}$/.test(cleanUser)) {
+  if (/^\d{10,15}$/.test(cleanUser) && isLikelyRealPhone(cleanUser, jid)) {
     return cleanUser;
   }
   return null;

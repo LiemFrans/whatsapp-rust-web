@@ -1,6 +1,7 @@
 pub mod assignment;
 pub mod audit;
 pub mod chat;
+pub mod display;
 pub mod escalation;
 pub mod message;
 pub mod quick_reply;

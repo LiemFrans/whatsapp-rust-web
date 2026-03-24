@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import type { Message } from '@/types';
 import type { ContactsMap } from '@/store/chatStore';
-import { cleanSenderDisplay, formatMentions } from '@/utils/chat';
+import { cleanSenderDisplay, formatMentions, getSenderDisplayInfo } from '@/utils/chat';
 import { chatApi } from '@/services/api';
 
 interface ChatBubbleProps {
@@ -215,10 +215,19 @@ export default function ChatBubble({ message, chatId, showSender, contacts, onRe
         )}
 
         {/* Sender name (groups) */}
-        {showSender && (
-          <p className="mb-0.5 text-xs font-semibold text-wa-green">
-            {isMe ? '~ You' : cleanSenderDisplay(message.sender_name, message.sender, contacts)}
-          </p>
+        {showSender && !isMe && (() => {
+          const info = getSenderDisplayInfo(message.sender_name, message.sender, contacts, message.sender_phone_number);
+          return (
+            <div className="mb-0.5 flex items-baseline gap-2 text-xs">
+              <span className="font-semibold text-wa-green">~ {info.displayName}</span>
+              {info.formattedPhone && (
+                <span className="font-normal text-gray-500 dark:text-gray-400">{info.formattedPhone}</span>
+              )}
+            </div>
+          );
+        })()}
+        {showSender && isMe && (
+          <p className="mb-0.5 text-xs font-semibold text-wa-green">~ You</p>
         )}
 
         {/* Starred indicator */}

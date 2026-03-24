@@ -50,7 +50,10 @@ async fn get_queue(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
         )
-    })?;
+    })?
+    .into_iter()
+    .map(crate::models::chat::Chat::sanitized)
+    .collect::<Vec<_>>();
 
     Ok(Json(serde_json::json!({ "queue": queue })))
 }
@@ -73,7 +76,10 @@ async fn my_chats(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
         )
-    })?;
+    })?
+    .into_iter()
+    .map(crate::models::chat::Chat::sanitized)
+    .collect::<Vec<_>>();
 
     Ok(Json(serde_json::json!({ "chats": chats })))
 }

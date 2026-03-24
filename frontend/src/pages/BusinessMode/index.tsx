@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Plus,
@@ -20,7 +20,7 @@ import QRCodeModal from '@/components/QRCodeModal';
 import SettingsPanel from '@/pages/Settings';
 import { useChatStore } from '@/store/chatStore';
 import { useBusinessStore } from '@/store/businessStore';
-import { getChatDisplayName } from '@/utils/chat';
+import { getChatDisplayName, formatPhoneDisplay, isLikelyRealPhone } from '@/utils/chat';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import wsService from '@/services/websocket';
 import type { Message, Chat, Ticket } from '@/types';
@@ -38,6 +38,10 @@ export default function BusinessMode() {
   const [qrStatus, setQrStatus] = useState<'connecting' | 'qr_code' | 'connected' | 'error'>('connecting');
   const [sessionName, setSessionName] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const isPaginatingRef = useRef(false);
+  const previousScrollHeightRef = useRef(0);
+  const shouldScrollToBottomRef = useRef(false);
 
   const {
     sessions,
@@ -45,6 +49,7 @@ export default function BusinessMode() {
     messages,
     contacts,
     isLoadingMessages,
+    hasMoreMessages,
     fetchSessions,
     fetchChats,
     fetchContacts,
@@ -119,23 +124,18 @@ export default function BusinessMode() {
     }
   }, [sessions, fetchChats, fetchContacts]);
 
-  useEffect(() => {
-    if (selectedChatId) {
-      fetchMessages(selectedChatId);
-    }
-  }, [selectedChatId, fetchMessages]);
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
-
   const handleSelectChat = useCallback((chatId: string) => {
     setSelectedChatId(chatId);
     setReplyTo(null);
+    shouldScrollToBottomRef.current = true;
   }, []);
 
-  const availableChats = [...queueChats, ...myChats, ...chats].filter(
-    (chat, index, self) => self.findIndex((item) => item.id === chat.id) === index
+  const availableChats = useMemo(
+    () =>
+      [...queueChats, ...myChats, ...chats].filter(
+        (chat, index, self) => self.findIndex((item) => item.id === chat.id) === index
+      ),
+    [queueChats, myChats, chats]
   );
 
   useEffect(() => {
@@ -188,6 +188,37 @@ export default function BusinessMode() {
 
   const selectedChat = availableChats.find((c) => c.id === selectedChatId);
   const currentMessages = selectedChatId ? (messages[selectedChatId] || []) : [];
+
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    if (isPaginatingRef.current) {
+      const addedHeight = container.scrollHeight - previousScrollHeightRef.current;
+      container.scrollTop = addedHeight;
+      isPaginatingRef.current = false;
+      return;
+    }
+
+    if (shouldScrollToBottomRef.current && currentMessages.length > 0) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+      shouldScrollToBottomRef.current = false;
+    }
+  }, [selectedChatId, currentMessages.length]);
+
+  const handleLoadOlderMessages = useCallback(async () => {
+    const container = messagesContainerRef.current;
+    if (!container || !selectedChatId || isLoadingMessages || !hasMoreMessages || currentMessages.length === 0) {
+      return;
+    }
+
+    const oldestMessage = currentMessages[0];
+    if (!oldestMessage?.timestamp) return;
+
+    isPaginatingRef.current = true;
+    previousScrollHeightRef.current = container.scrollHeight;
+    await fetchMessages(selectedChatId, oldestMessage.timestamp);
+  }, [selectedChatId, isLoadingMessages, hasMoreMessages, currentMessages, fetchMessages]);
 
   const renderPanel = () => {
     switch (activeTab) {
@@ -256,16 +287,25 @@ export default function BusinessMode() {
       <div className="flex min-w-0 flex-1 flex-col">
         {selectedChat ? (
           <>
-            <div className="flex h-14 items-center gap-3 border-b border-gray-200 bg-gray-50 px-4 dark:border-gray-700 dark:bg-wa-dark-header">
+            <div className="flex h-14 shrink-0 items-center gap-3 border-b border-gray-200 bg-gray-50 px-4 dark:border-gray-700 dark:bg-wa-dark-header">
               <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gray-300 text-white dark:bg-gray-600">
                 <span className="font-semibold">
                   {getChatDisplayName(selectedChat, contacts)[0]?.toUpperCase() || '?'}
                 </span>
               </div>
               <div className="min-w-0 flex-1">
-                <h3 className="truncate font-medium text-gray-900 dark:text-white">
-                  {getChatDisplayName(selectedChat, contacts)}
-                </h3>
+                <div className="flex items-baseline gap-2">
+                  <h3 className="truncate font-medium text-gray-900 dark:text-white">
+                    {getChatDisplayName(selectedChat, contacts)}
+                  </h3>
+                  {(() => {
+                    const rawPhone = selectedChat.phone_number?.trim().replace(/^\+/, '') || '';
+                    if (rawPhone && isLikelyRealPhone(rawPhone, selectedChat.chat_jid)) {
+                      return <span className="shrink-0 text-xs text-gray-500">{formatPhoneDisplay(rawPhone)}</span>;
+                    }
+                    return null;
+                  })()}
+                </div>
                 <p className="truncate text-xs text-gray-500">
                   {selectedChat.assigned_agent_name
                     ? `Assigned to: ${selectedChat.assigned_agent_name}`
@@ -283,8 +323,24 @@ export default function BusinessMode() {
               </div>
             </div>
 
-            <div className="chat-bg flex-1 overflow-y-auto py-4 scrollbar-thin">
-              {isLoadingMessages ? (
+            <div className="chat-bg relative flex-1 overflow-hidden">
+              {currentMessages.length > 0 && (
+                <div className="absolute inset-x-0 top-2 z-10 flex justify-center px-4">
+                  <button
+                    onClick={() => void handleLoadOlderMessages()}
+                    disabled={isLoadingMessages || !hasMoreMessages}
+                    className="rounded-full bg-white/95 px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-white disabled:opacity-60 dark:bg-gray-800/95 dark:text-gray-200 dark:hover:bg-gray-700"
+                  >
+                    {isLoadingMessages ? 'Loading...' : hasMoreMessages ? 'Fetch older messages' : 'All messages loaded'}
+                  </button>
+                </div>
+              )}
+
+              <div
+                ref={messagesContainerRef}
+                className="h-full overflow-y-auto py-4 pt-12 scrollbar-thin"
+              >
+              {isLoadingMessages && currentMessages.length === 0 ? (
                 <div className="flex h-full items-center justify-center">
                   <Loader2 size={32} className="animate-spin text-wa-green" />
                 </div>
@@ -303,6 +359,7 @@ export default function BusinessMode() {
                   <div ref={messagesEndRef} />
                 </>
               )}
+              </div>
             </div>
 
             <MessageInput
@@ -477,17 +534,18 @@ function TicketPanel({ tickets, onCreateTicket }: { tickets: Ticket[]; onCreateT
   return (
     <div className="flex h-full flex-col">
       <div className="flex h-14 items-center justify-between border-b border-gray-200 bg-wa-header px-4 dark:border-gray-700 dark:bg-wa-dark-header">
-        <h2 className="text-lg font-semibold text-white">Tickets</h2>
+        <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Tickets</h2>
         <div className="flex items-center gap-2">
-          <span className="rounded-full bg-white/20 px-2 py-0.5 text-xs text-white">
+          <span className="rounded-full bg-gray-200 px-2 py-0.5 text-xs text-gray-700 dark:bg-white/20 dark:text-white">
             {tickets.length}
           </span>
           <button
             onClick={onCreateTicket}
-            className="rounded-full bg-white/20 p-1.5 text-white hover:bg-white/30"
+            className="inline-flex items-center gap-1 rounded-lg bg-wa-green px-2.5 py-1.5 text-xs font-medium text-white shadow-sm hover:bg-wa-green/90"
             title="Create Ticket"
           >
             <Plus size={16} />
+            <span>New</span>
           </button>
         </div>
       </div>
@@ -650,6 +708,19 @@ function CreateTicketModal({
   onClose: () => void;
   onSubmit: (data: Record<string, unknown>) => Promise<void>;
 }) {
+  const formatTicketPriority = (value: 'low' | 'medium' | 'high' | 'critical') => {
+    switch (value) {
+      case 'low':
+        return 'Low';
+      case 'medium':
+        return 'Medium';
+      case 'high':
+        return 'High';
+      case 'critical':
+        return 'Critical';
+    }
+  };
+
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState<'low' | 'medium' | 'high' | 'critical'>('medium');
@@ -666,7 +737,7 @@ function CreateTicketModal({
         chat_id: chatId,
         title: title.trim(),
         description: description.trim() || undefined,
-        priority,
+        priority: formatTicketPriority(priority),
         category: category.trim() || undefined,
       });
     } finally {

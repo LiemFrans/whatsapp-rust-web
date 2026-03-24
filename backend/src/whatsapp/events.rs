@@ -14,6 +14,7 @@ use whatsapp_rust::client::Client;
 use whatsapp_rust::proto_helpers::MessageExt;
 use wacore::types::events::Event;
 
+use crate::models::display::preferred_display_name;
 use crate::websocket::hub::WebSocketHub;
 
 /// Main event dispatcher — called for every WhatsApp event
@@ -262,6 +263,17 @@ pub async fn handle_event(
                 .await;
             }
 
+            // Look up sender's phone number from contacts.
+            // Important: incoming senders can arrive as device-scoped LID JIDs
+            // like "4372444528669:71@lid" while contacts are often stored as
+            // "4372444528669@lid". Normalize before matching.
+            let sender_phone_number = lookup_contact_phone_number(db, session_id, &sender_jid).await;
+
+            let sender_name = preferred_display_name(
+                sender_name.as_deref(),
+                sender_phone_number.as_deref(),
+            );
+
             // Broadcast new message via WebSocket
             ws_hub.send_to_user(user_id, serde_json::json!({
                 "type": "new_message",
@@ -273,6 +285,7 @@ pub async fn handle_event(
                         "message_id": message_id,
                         "sender": sender_jid,
                         "sender_name": sender_name,
+                        "sender_phone_number": sender_phone_number,
                         "content": info.content,
                         "message_type": info.msg_type,
                         "media_url": info.media_url,
@@ -542,13 +555,15 @@ pub async fn handle_event(
             .execute(db)
             .await;
 
+            let sanitized_name = preferred_display_name(Some(new_name), phone.as_deref());
+
             // Notify frontend about the contact update
             ws_hub.send_to_user(user_id, serde_json::json!({
                 "type": "contacts_updated",
                 "data": {
                     "session_id": session_id,
                     "jid": jid,
-                    "push_name": new_name,
+                    "push_name": sanitized_name,
                     "phone_number": phone,
                 }
             }));
@@ -875,6 +890,62 @@ async fn upsert_chat(
             None
         }
     }
+}
+
+fn jid_lookup_parts(jid: &str) -> (String, String, String, String) {
+    let mut split = jid.splitn(2, '@');
+    let user_part = split.next().unwrap_or_default().to_string();
+    let domain = split.next().unwrap_or_default().to_string();
+    let clean_user_part = user_part.split(':').next().unwrap_or_default().to_string();
+    let canonical_jid = if domain.is_empty() {
+        clean_user_part.clone()
+    } else {
+        format!("{}@{}", clean_user_part, domain)
+    };
+
+    (user_part, clean_user_part, domain, canonical_jid)
+}
+
+async fn lookup_contact_phone_number(
+    db: &PgPool,
+    session_id: Uuid,
+    sender_jid: &str,
+) -> Option<String> {
+    let (user_part, clean_user_part, _domain, canonical_jid) = jid_lookup_parts(sender_jid);
+    let canonical_lid_jid = format!("{}@lid", clean_user_part);
+
+    sqlx::query_scalar(
+        "SELECT phone_number
+         FROM contacts
+         WHERE session_id = $1
+           AND phone_number IS NOT NULL
+           AND (
+               jid = $2
+               OR jid = $3
+               OR jid = $4
+               OR split_part(jid, '@', 1) = $5
+               OR split_part(split_part(jid, '@', 1), ':', 1) = $6
+           )
+         ORDER BY CASE
+             WHEN jid = $2 THEN 0
+             WHEN jid = $3 THEN 1
+             WHEN jid = $4 THEN 2
+             WHEN split_part(jid, '@', 1) = $5 THEN 3
+             WHEN split_part(split_part(jid, '@', 1), ':', 1) = $6 THEN 4
+             ELSE 5
+         END
+         LIMIT 1",
+    )
+    .bind(session_id)
+    .bind(sender_jid)
+    .bind(&canonical_jid)
+    .bind(&canonical_lid_jid)
+    .bind(&user_part)
+    .bind(&clean_user_part)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
 }
 
 #[cfg(test)]

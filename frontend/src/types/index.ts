@@ -90,6 +90,7 @@ export interface Message {
   message_id: string;
   sender: string;
   sender_name: string | null;
+  sender_phone_number: string | null;
   content: string | null;
   message_type: MessageType;
   media_url: string | null;

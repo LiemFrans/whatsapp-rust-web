@@ -66,7 +66,10 @@ async fn list_chats(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
         )
-    })?;
+    })?
+    .into_iter()
+    .map(Chat::sanitized)
+    .collect::<Vec<_>>();
 
     Ok(Json(serde_json::json!({ "chats": chats })))
 }
@@ -87,7 +90,10 @@ async fn list_contacts(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
         )
-    })?;
+    })?
+    .into_iter()
+    .map(Contact::sanitized)
+    .collect::<Vec<_>>();
 
     Ok(Json(serde_json::json!({ "contacts": contacts })))
 }
@@ -110,9 +116,33 @@ async fn list_messages(
                 )
             })?;
         sqlx::query_as::<_, Message>(
-            "SELECT * FROM messages
-             WHERE chat_id = $1 AND timestamp < $2
-             ORDER BY timestamp DESC LIMIT $3",
+                        "SELECT m.*, contact_match.phone_number AS sender_phone_number
+                         FROM messages m
+                         JOIN chats ch ON ch.id = m.chat_id
+                         LEFT JOIN LATERAL (
+                             SELECT c.phone_number
+                             FROM contacts c
+                             WHERE c.session_id = ch.session_id
+                                 AND c.phone_number IS NOT NULL
+                                 AND (
+                                     c.jid = m.sender
+                                     OR c.jid = CONCAT(split_part(split_part(m.sender, '@', 1), ':', 1), '@', split_part(m.sender, '@', 2))
+                                     OR c.jid = CONCAT(split_part(split_part(m.sender, '@', 1), ':', 1), '@lid')
+                                     OR split_part(c.jid, '@', 1) = split_part(m.sender, '@', 1)
+                                     OR split_part(split_part(c.jid, '@', 1), ':', 1) = split_part(split_part(m.sender, '@', 1), ':', 1)
+                                 )
+                             ORDER BY CASE
+                                 WHEN c.jid = m.sender THEN 0
+                                 WHEN c.jid = CONCAT(split_part(split_part(m.sender, '@', 1), ':', 1), '@', split_part(m.sender, '@', 2)) THEN 1
+                                 WHEN c.jid = CONCAT(split_part(split_part(m.sender, '@', 1), ':', 1), '@lid') THEN 2
+                                 WHEN split_part(c.jid, '@', 1) = split_part(m.sender, '@', 1) THEN 3
+                                 WHEN split_part(split_part(c.jid, '@', 1), ':', 1) = split_part(split_part(m.sender, '@', 1), ':', 1) THEN 4
+                                 ELSE 5
+                             END
+                             LIMIT 1
+                         ) AS contact_match ON TRUE
+             WHERE m.chat_id = $1 AND m.timestamp < $2
+             ORDER BY m.timestamp DESC LIMIT $3",
         )
         .bind(chat_id)
         .bind(cursor_time)
@@ -121,9 +151,33 @@ async fn list_messages(
         .await
     } else {
         sqlx::query_as::<_, Message>(
-            "SELECT * FROM messages
-             WHERE chat_id = $1
-             ORDER BY timestamp DESC LIMIT $2",
+                        "SELECT m.*, contact_match.phone_number AS sender_phone_number
+                         FROM messages m
+                         JOIN chats ch ON ch.id = m.chat_id
+                         LEFT JOIN LATERAL (
+                             SELECT c.phone_number
+                             FROM contacts c
+                             WHERE c.session_id = ch.session_id
+                                 AND c.phone_number IS NOT NULL
+                                 AND (
+                                     c.jid = m.sender
+                                     OR c.jid = CONCAT(split_part(split_part(m.sender, '@', 1), ':', 1), '@', split_part(m.sender, '@', 2))
+                                     OR c.jid = CONCAT(split_part(split_part(m.sender, '@', 1), ':', 1), '@lid')
+                                     OR split_part(c.jid, '@', 1) = split_part(m.sender, '@', 1)
+                                     OR split_part(split_part(c.jid, '@', 1), ':', 1) = split_part(split_part(m.sender, '@', 1), ':', 1)
+                                 )
+                             ORDER BY CASE
+                                 WHEN c.jid = m.sender THEN 0
+                                 WHEN c.jid = CONCAT(split_part(split_part(m.sender, '@', 1), ':', 1), '@', split_part(m.sender, '@', 2)) THEN 1
+                                 WHEN c.jid = CONCAT(split_part(split_part(m.sender, '@', 1), ':', 1), '@lid') THEN 2
+                                 WHEN split_part(c.jid, '@', 1) = split_part(m.sender, '@', 1) THEN 3
+                                 WHEN split_part(split_part(c.jid, '@', 1), ':', 1) = split_part(split_part(m.sender, '@', 1), ':', 1) THEN 4
+                                 ELSE 5
+                             END
+                             LIMIT 1
+                         ) AS contact_match ON TRUE
+             WHERE m.chat_id = $1
+             ORDER BY m.timestamp DESC LIMIT $2",
         )
         .bind(chat_id)
         .bind(limit)
@@ -136,7 +190,10 @@ async fn list_messages(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
         )
-    })?;
+    })?
+    .into_iter()
+    .map(Message::sanitized)
+    .collect::<Vec<_>>();
 
     let has_more = messages.len() as i64 == limit;
     messages.reverse(); // Return in chronological order
@@ -332,7 +389,8 @@ async fn send_message(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
         )
-    })?;
+    })?
+    .sanitized();
 
     // Update chat last_message
     sqlx::query("UPDATE chats SET last_message = $1, last_message_at = NOW() WHERE id = $2")
@@ -476,7 +534,8 @@ async fn send_media_message(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
         )
-    })?;
+    })?
+    .sanitized();
 
     // Update chat last_message
     sqlx::query("UPDATE chats SET last_message = $1, last_message_at = NOW() WHERE id = $2")

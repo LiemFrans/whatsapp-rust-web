@@ -8,7 +8,7 @@ import MessageInput from '@/components/MessageInput';
 import QRCodeModal from '@/components/QRCodeModal';
 import SettingsPanel from '@/pages/Settings';
 import { useChatStore } from '@/store/chatStore';
-import { getChatDisplayName } from '@/utils/chat';
+import { getChatDisplayName, formatPhoneDisplay, isLikelyRealPhone } from '@/utils/chat';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import wsService from '@/services/websocket';
 import type { Message } from '@/types';
@@ -24,6 +24,10 @@ export default function PersonalMode() {
   const [qrStatus, setQrStatus] = useState<'connecting' | 'qr_code' | 'connected' | 'error'>('connecting');
   const [sessionName, setSessionName] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const isPaginatingRef = useRef(false);
+  const previousScrollHeightRef = useRef(0);
+  const shouldScrollToBottomRef = useRef(false);
 
   const {
     sessions,
@@ -31,6 +35,7 @@ export default function PersonalMode() {
     messages,
     contacts,
     isLoadingMessages,
+    hasMoreMessages,
     fetchSessions,
     fetchChats,
     fetchContacts,
@@ -76,21 +81,30 @@ export default function PersonalMode() {
     }
   }, [sessions, fetchChats, fetchContacts]);
 
-  // Load messages when chat selected
-  useEffect(() => {
-    if (selectedChatId) {
-      fetchMessages(selectedChatId);
-    }
-  }, [selectedChatId, fetchMessages]);
+  const selectedChat = chats.find((c) => c.id === selectedChatId);
+  const currentMessages = selectedChatId ? (messages[selectedChatId] || []) : [];
 
-  // Auto-scroll to bottom
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    if (isPaginatingRef.current) {
+      const addedHeight = container.scrollHeight - previousScrollHeightRef.current;
+      container.scrollTop = addedHeight;
+      isPaginatingRef.current = false;
+      return;
+    }
+
+    if (shouldScrollToBottomRef.current && currentMessages.length > 0) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+      shouldScrollToBottomRef.current = false;
+    }
+  }, [selectedChatId, currentMessages.length]);
 
   const handleSelectChat = useCallback((chatId: string) => {
     setSelectedChatId(chatId);
     setReplyTo(null);
+    shouldScrollToBottomRef.current = true;
   }, []);
 
   useEffect(() => {
@@ -130,8 +144,19 @@ export default function PersonalMode() {
     }
   };
 
-  const selectedChat = chats.find((c) => c.id === selectedChatId);
-  const currentMessages = selectedChatId ? (messages[selectedChatId] || []) : [];
+  const handleLoadOlderMessages = useCallback(async () => {
+    const container = messagesContainerRef.current;
+    if (!container || !selectedChatId || isLoadingMessages || !hasMoreMessages || currentMessages.length === 0) {
+      return;
+    }
+
+    const oldestMessage = currentMessages[0];
+    if (!oldestMessage?.timestamp) return;
+
+    isPaginatingRef.current = true;
+    previousScrollHeightRef.current = container.scrollHeight;
+    await fetchMessages(selectedChatId, oldestMessage.timestamp);
+  }, [selectedChatId, isLoadingMessages, hasMoreMessages, currentMessages, fetchMessages]);
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -186,7 +211,7 @@ export default function PersonalMode() {
         {selectedChat ? (
           <>
             {/* Chat header */}
-            <div className="flex h-14 items-center gap-3 border-b border-gray-200 bg-gray-50 px-4 dark:border-gray-700 dark:bg-wa-dark-header">
+            <div className="flex h-14 shrink-0 items-center gap-3 border-b border-gray-200 bg-gray-50 px-4 dark:border-gray-700 dark:bg-wa-dark-header">
               <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gray-300 text-white dark:bg-gray-600">
                 {selectedChat.profile_pic_url ? (
                   <img src={selectedChat.profile_pic_url} alt="" className="h-full w-full rounded-full object-cover" />
@@ -197,18 +222,43 @@ export default function PersonalMode() {
                 )}
               </div>
               <div className="min-w-0 flex-1">
-                <h3 className="truncate font-medium text-gray-900 dark:text-white">
-                  {getChatDisplayName(selectedChat, contacts)}
-                </h3>
+                <div className="flex items-baseline gap-2">
+                  <h3 className="truncate font-medium text-gray-900 dark:text-white">
+                    {getChatDisplayName(selectedChat, contacts)}
+                  </h3>
+                  {(() => {
+                    const rawPhone = selectedChat.phone_number?.trim().replace(/^\+/, '') || '';
+                    if (rawPhone && isLikelyRealPhone(rawPhone, selectedChat.chat_jid)) {
+                      return <span className="shrink-0 text-xs text-gray-500">{formatPhoneDisplay(rawPhone)}</span>;
+                    }
+                    return null;
+                  })()}
+                </div>
                 <p className="truncate text-xs text-gray-500">
-                  {selectedChat.is_group ? 'Group' : selectedChat.phone_number || 'Online'}
+                  {selectedChat.is_group ? 'Group' : 'Online'}
                 </p>
               </div>
             </div>
 
             {/* Messages */}
-            <div className="chat-bg flex-1 overflow-y-auto py-4 scrollbar-thin">
-              {isLoadingMessages ? (
+            <div className="chat-bg relative flex-1 overflow-hidden">
+              {currentMessages.length > 0 && (
+                <div className="absolute inset-x-0 top-2 z-10 flex justify-center px-4">
+                  <button
+                    onClick={() => void handleLoadOlderMessages()}
+                    disabled={isLoadingMessages || !hasMoreMessages}
+                    className="rounded-full bg-white/95 px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-white disabled:opacity-60 dark:bg-gray-800/95 dark:text-gray-200 dark:hover:bg-gray-700"
+                  >
+                    {isLoadingMessages ? 'Loading...' : hasMoreMessages ? 'Fetch older messages' : 'All messages loaded'}
+                  </button>
+                </div>
+              )}
+
+              <div
+                ref={messagesContainerRef}
+                className="h-full overflow-y-auto py-4 pt-12 scrollbar-thin"
+              >
+              {isLoadingMessages && currentMessages.length === 0 ? (
                 <div className="flex h-full items-center justify-center">
                   <Loader2 size={32} className="animate-spin text-wa-green" />
                 </div>
@@ -232,6 +282,7 @@ export default function PersonalMode() {
                   <div ref={messagesEndRef} />
                 </>
               )}
+              </div>
             </div>
 
             {/* Input */}

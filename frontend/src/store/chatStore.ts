@@ -130,8 +130,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   setActiveChat: (chat) => {
+    const currentActiveChatId = get().activeChat?.id;
+
     set({ activeChat: chat, hasMoreMessages: true });
-    if (chat) {
+
+    if (chat && currentActiveChatId !== chat.id) {
       get().fetchMessages(chat.id);
       if (chat.unread_count > 0) {
         get().markChatRead(chat.id);
