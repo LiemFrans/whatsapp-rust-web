@@ -33,12 +33,12 @@ services:
       JWT_EXPIRY_HOURS: ${JWT_EXPIRY_HOURS:-24}
       REFRESH_TOKEN_EXPIRY_DAYS: ${REFRESH_TOKEN_EXPIRY_DAYS:-7}
       RUST_LOG: ${RUST_LOG:-info,whatsapp_web_backend=debug}
-      SERVER_HOST: 0.0.0.0
-      SERVER_PORT: 8080
+      PORT: ${BACKEND_PORT:-8080}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
-      SESSION_ENCRYPTION_KEY: ${SESSION_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef}
       SYNC_DAYS_LIMIT: ${SYNC_DAYS_LIMIT:-90}
       SESSION_DB_DIR: /app/sessions
+      WEBHOOK_URL: ${WEBHOOK_URL:-}
+      WEBHOOK_TOKEN: ${WEBHOOK_TOKEN:-}
     ports:
       - "${BACKEND_PORT:-8080}:8080"
     volumes:
@@ -53,15 +53,15 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8080}
+        VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:8080}
     container_name: wa-frontend
     restart: unless-stopped
     depends_on:
       - backend
     ports:
       - "${FRONTEND_PORT:-5173}:80"
-    environment:
-      VITE_API_URL: ${VITE_API_URL:-http://localhost:8080}
-      VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:8080}
 
 volumes:
   postgres_data:
