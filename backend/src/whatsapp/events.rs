@@ -15,6 +15,7 @@ use whatsapp_rust::proto_helpers::MessageExt;
 use wacore::types::events::Event;
 
 use crate::models::display::preferred_display_name;
+use crate::webhook::{self, WebhookClient};
 use crate::websocket::hub::WebSocketHub;
 
 /// Main event dispatcher — called for every WhatsApp event
@@ -25,6 +26,7 @@ pub async fn handle_event(
     user_id: Uuid,
     db: &PgPool,
     ws_hub: &WebSocketHub,
+    webhook_client: &WebhookClient,
 ) {
     match event {
         // ── QR Code Pairing ─────────────────────────────────────────
@@ -301,6 +303,26 @@ pub async fn handle_event(
                     }
                 }
             }));
+
+            // ── Webhook: dispatch incoming message to external system ──
+            if !is_from_me {
+                let session_phone = get_session_phone_number(db, session_id).await;
+                if let Some(ref phone) = session_phone {
+                    let webhook_data = webhook::build_message_payload(
+                        &message_id,
+                        sender_phone_number.as_deref().unwrap_or(&sender_jid),
+                        sender_name.as_deref(),
+                        phone,
+                        &timestamp,
+                        &info.msg_type,
+                        info.content.as_deref(),
+                        info.media_url.as_deref(),
+                        info.media_mime.as_deref(),
+                        info.media_filename.as_deref(),
+                    );
+                    webhook_client.dispatch(session_id, phone, "message", webhook_data);
+                }
+            }
         }
 
         // ── Read Receipts ───────────────────────────────────────────
@@ -331,6 +353,13 @@ pub async fn handle_event(
                         "status": status,
                     }
                 }));
+
+                // ── Webhook: dispatch status update to external system ──
+                let session_phone = get_session_phone_number(db, session_id).await;
+                if let Some(ref phone) = session_phone {
+                    let webhook_data = webhook::build_status_payload(msg_id, status, None, None);
+                    webhook_client.dispatch(session_id, phone, "status", webhook_data);
+                }
             }
         }
 
@@ -946,6 +975,17 @@ async fn lookup_contact_phone_number(
     .await
     .ok()
     .flatten()
+}
+
+/// Look up the phone_number (e.g. "6281234567890") for a given session id.
+/// Returns `None` when the session doesn't exist or the query fails.
+async fn get_session_phone_number(db: &sqlx::PgPool, session_id: uuid::Uuid) -> Option<String> {
+    sqlx::query_scalar::<_, String>("SELECT phone_number FROM whatsapp_sessions WHERE id = $1")
+        .bind(session_id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
 }
 
 #[cfg(test)]

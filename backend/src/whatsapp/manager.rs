@@ -16,6 +16,7 @@ use wacore_binary::jid::Jid;
 use waproto::whatsapp as wa;
 
 use crate::config::AppConfig;
+use crate::webhook::WebhookClient;
 use crate::websocket::hub::WebSocketHub;
 use crate::whatsapp::events;
 
@@ -42,15 +43,17 @@ pub struct WhatsAppManager {
     pub db: PgPool,
     pub config: Arc<AppConfig>,
     pub ws_hub: Arc<WebSocketHub>,
+    pub webhook_client: Arc<WebhookClient>,
 }
 
 impl WhatsAppManager {
-    pub fn new(db: PgPool, config: Arc<AppConfig>, ws_hub: Arc<WebSocketHub>) -> Self {
+    pub fn new(db: PgPool, config: Arc<AppConfig>, ws_hub: Arc<WebSocketHub>, webhook_client: Arc<WebhookClient>) -> Self {
         Self {
             sessions: Arc::new(DashMap::new()),
             db,
             config,
             ws_hub,
+            webhook_client,
         }
     }
 
@@ -449,6 +452,7 @@ async fn run_whatsapp_session(
     // Set up shared state for event handling
     let db = manager.db.clone();
     let ws_hub = manager.ws_hub.clone();
+    let webhook_client = manager.webhook_client.clone();
     let sessions = manager.sessions.clone();
     let sid = session_id;
     let uid = user_id;
@@ -462,6 +466,7 @@ async fn run_whatsapp_session(
         .on_event(move |event, client| {
             let db = db.clone();
             let ws_hub = ws_hub.clone();
+            let webhook_client = webhook_client.clone();
             let sessions = sessions.clone();
             async move {
                 // Store the client reference in SessionInfo on first event
@@ -471,7 +476,7 @@ async fn run_whatsapp_session(
                     }
                 }
                 // Delegate to event handler
-                events::handle_event(event, client, sid, uid, &db, &ws_hub).await;
+                events::handle_event(event, client, sid, uid, &db, &ws_hub, &webhook_client).await;
             }
         })
         .build()

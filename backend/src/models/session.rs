@@ -22,6 +22,8 @@ pub struct WhatsAppSession {
     pub db_path: String,
     pub status: SessionStatus,
     pub qr_code_data: Option<String>,
+    pub webhook_url: Option<String>,
+    pub webhook_token: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_active_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
@@ -38,6 +40,7 @@ pub struct SessionResponse {
     pub session_name: String,
     pub phone_number: Option<String>,
     pub status: SessionStatus,
+    pub webhook_url: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_active_at: Option<DateTime<Utc>>,
 }
@@ -49,10 +52,17 @@ impl From<WhatsAppSession> for SessionResponse {
             session_name: s.session_name,
             phone_number: s.phone_number,
             status: s.status,
+            webhook_url: s.webhook_url,
             created_at: s.created_at,
             last_active_at: s.last_active_at,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateWebhookRequest {
+    pub webhook_url: Option<String>,
+    pub webhook_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

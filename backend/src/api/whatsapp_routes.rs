@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, State},
-    routing::{get, post, delete},
+    routing::{get, post, put, delete},
     Json, Router,
 };
 use uuid::Uuid;
@@ -13,6 +13,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/sessions", get(list_sessions))
         .route("/sessions/:session_id", delete(delete_session))
+        .route("/sessions/:session_id/webhook", put(update_webhook))
         .route("/connect", post(connect_session))
         .route("/disconnect/:session_id", post(disconnect_session))
         .route("/status/:session_id", get(session_status))
@@ -192,4 +193,62 @@ async fn session_status(
     let alive = state.wa_manager.is_session_alive(&session_id);
     let resp: SessionResponse = session.into();
     Ok(Json(serde_json::json!({ "session": resp, "alive": alive })))
+}
+
+/// PUT /api/whatsapp/sessions/:session_id/webhook
+/// Configure the webhook URL and optional auth token for a session.
+async fn update_webhook(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(session_id): Path<Uuid>,
+    Json(req): Json<UpdateWebhookRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth, "whatsapp:manage")?;
+
+    // Verify session exists and belongs to the authenticated user
+    let session = sqlx::query_as::<_, WhatsAppSession>(
+        "SELECT * FROM whatsapp_sessions WHERE id = $1",
+    )
+    .bind(session_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?
+    .ok_or_else(|| {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "Session not found" })),
+        )
+    })?;
+
+    if session.user_id != auth.user_id {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "Not your session" })),
+        ));
+    }
+
+    sqlx::query(
+        "UPDATE whatsapp_sessions SET webhook_url = $1, webhook_token = $2 WHERE id = $3",
+    )
+    .bind(&req.webhook_url)
+    .bind(&req.webhook_token)
+    .bind(session_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "message": "Webhook configuration updated",
+        "webhook_url": req.webhook_url,
+    })))
 }

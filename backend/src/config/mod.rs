@@ -8,6 +8,10 @@ pub struct AppConfig {
     pub cors_origins: Vec<String>,
     pub session_db_dir: String,
     pub sync_days_limit: i32,
+    /// Default webhook URL for new sessions (can be overridden per-session)
+    pub webhook_url: Option<String>,
+    /// Default webhook token sent with webhook requests
+    pub webhook_token: Option<String>,
 }
 
 impl AppConfig {
@@ -34,6 +38,8 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+            webhook_url: std::env::var("WEBHOOK_URL").ok().filter(|s| !s.is_empty()),
+            webhook_token: std::env::var("WEBHOOK_TOKEN").ok().filter(|s| !s.is_empty()),
         })
     }
 }

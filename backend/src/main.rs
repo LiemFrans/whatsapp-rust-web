@@ -4,6 +4,7 @@ mod config;
 mod db;
 mod models;
 mod services;
+mod webhook;
 mod websocket;
 mod whatsapp;
 
@@ -17,6 +18,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 use config::AppConfig;
+use webhook::WebhookClient;
 use websocket::hub::WebSocketHub;
 use whatsapp::manager::WhatsAppManager;
 
@@ -26,6 +28,7 @@ pub struct AppState {
     pub config: Arc<AppConfig>,
     pub wa_manager: Arc<WhatsAppManager>,
     pub ws_hub: Arc<WebSocketHub>,
+    pub webhook_client: Arc<WebhookClient>,
     /// In-memory rate limiter for API tokens: token_id → (request_count, window_start)
     pub rate_limiter: Arc<DashMap<uuid::Uuid, (u32, std::time::Instant)>>,
 }
@@ -52,10 +55,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Create shared state
     let ws_hub = Arc::new(WebSocketHub::new());
+    let webhook_client = Arc::new(WebhookClient::new(config.clone(), db.clone()));
     let wa_manager = Arc::new(WhatsAppManager::new(
         db.clone(),
         config.clone(),
         ws_hub.clone(),
+        webhook_client.clone(),
     ));
 
     // Restore existing sessions
@@ -66,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
         config: config.clone(),
         wa_manager,
         ws_hub,
+        webhook_client,
         rate_limiter: Arc::new(DashMap::new()),
     };
 
