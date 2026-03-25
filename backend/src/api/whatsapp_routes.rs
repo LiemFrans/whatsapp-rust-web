@@ -5,7 +5,7 @@ use axum::{
 };
 use uuid::Uuid;
 
-use crate::auth::middleware::AuthUser;
+use crate::auth::middleware::{AuthUser, require_scope};
 use crate::models::session::*;
 use crate::AppState;
 
@@ -22,6 +22,7 @@ async fn list_sessions(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth, "whatsapp:manage")?;
     let sessions = sqlx::query_as::<_, WhatsAppSession>(
         "SELECT * FROM whatsapp_sessions WHERE user_id = $1 ORDER BY created_at DESC",
     )
@@ -44,6 +45,7 @@ async fn connect_session(
     auth: AuthUser,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth, "whatsapp:manage")?;
     let session_id = Uuid::new_v4();
     let db_path = format!(
         "{}/{}.db",
@@ -89,9 +91,10 @@ async fn connect_session(
 
 async fn disconnect_session(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(session_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth, "whatsapp:manage")?;
     state
         .wa_manager
         .disconnect_session(session_id)
@@ -117,6 +120,7 @@ async fn delete_session(
     auth: AuthUser,
     Path(session_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth, "whatsapp:manage")?;
     // Verify ownership
     let session = sqlx::query_as::<_, WhatsAppSession>(
         "SELECT * FROM whatsapp_sessions WHERE id = $1 AND user_id = $2",
@@ -162,9 +166,10 @@ async fn delete_session(
 
 async fn session_status(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(session_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth, "whatsapp:manage")?;
     let session = sqlx::query_as::<_, WhatsAppSession>(
         "SELECT * FROM whatsapp_sessions WHERE id = $1",
     )

@@ -1,3 +1,4 @@
+pub mod api_token;
 pub mod assignment;
 pub mod audit;
 pub mod chat;

@@ -10,6 +10,7 @@ mod whatsapp;
 use std::sync::Arc;
 
 use axum::Router;
+use dashmap::DashMap;
 use sqlx::PgPool;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
@@ -25,6 +26,8 @@ pub struct AppState {
     pub config: Arc<AppConfig>,
     pub wa_manager: Arc<WhatsAppManager>,
     pub ws_hub: Arc<WebSocketHub>,
+    /// In-memory rate limiter for API tokens: token_id → (request_count, window_start)
+    pub rate_limiter: Arc<DashMap<uuid::Uuid, (u32, std::time::Instant)>>,
 }
 
 #[tokio::main]
@@ -63,6 +66,7 @@ async fn main() -> anyhow::Result<()> {
         config: config.clone(),
         wa_manager,
         ws_hub,
+        rate_limiter: Arc::new(DashMap::new()),
     };
 
     // CORS

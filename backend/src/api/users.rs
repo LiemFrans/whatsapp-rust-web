@@ -5,7 +5,7 @@ use axum::{
 };
 use uuid::Uuid;
 
-use crate::auth::middleware::AuthUser;
+use crate::auth::middleware::{AuthUser, require_scope};
 use crate::models::user::*;
 use crate::AppState;
 
@@ -20,6 +20,7 @@ async fn list_users(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth, "users:read")?;
     if auth.role != UserRole::Admin {
         return Err((
             axum::http::StatusCode::FORBIDDEN,
@@ -48,6 +49,7 @@ async fn get_user(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth, "users:read")?;
     if auth.role != UserRole::Admin && auth.user_id != id {
         return Err((
             axum::http::StatusCode::FORBIDDEN,
@@ -82,6 +84,7 @@ async fn update_user(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateUserRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth, "users:write")?;
     if auth.role != UserRole::Admin && auth.user_id != id {
         return Err((
             axum::http::StatusCode::FORBIDDEN,
@@ -118,6 +121,7 @@ async fn toggle_active(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth, "users:write")?;
     if auth.role != UserRole::Admin {
         return Err((
             axum::http::StatusCode::FORBIDDEN,

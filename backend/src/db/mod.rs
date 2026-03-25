@@ -44,6 +44,18 @@ pub async fn run_migrations(pool: &PgPool) -> anyhow::Result<()> {
         }
     }
 
+    // Always apply incremental migration 003 (uses IF NOT EXISTS, safe to re-run)
+    let sql_003 = include_str!("../../../database/migrations/003_api_tokens.sql");
+    let stmts_003 = split_sql_statements(sql_003);
+    for stmt in &stmts_003 {
+        let s = stmt.trim();
+        if !s.is_empty() && !s.starts_with("--") {
+            if let Err(e) = sqlx::query(s).execute(pool).await {
+                tracing::warn!("Migration 003 statement (may be harmless): {}", e);
+            }
+        }
+    }
+
     Ok(())
 }
 

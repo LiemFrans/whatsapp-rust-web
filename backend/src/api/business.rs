@@ -5,7 +5,7 @@ use axum::{
 };
 use uuid::Uuid;
 
-use crate::auth::middleware::{AgentUser, AuthUser};
+use crate::auth::middleware::{AdminUser, AgentUser, require_scope};
 use crate::models::assignment::*;
 use crate::models::escalation::*;
 use crate::models::quick_reply::*;
@@ -32,8 +32,9 @@ pub fn routes() -> Router<AppState> {
 
 async fn get_queue(
     State(state): State<AppState>,
-    _auth: AgentUser,
+    auth: AgentUser,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth.0, "business:read")?;
     let queue = sqlx::query_as::<_, crate::models::chat::Chat>(
         "SELECT c.* FROM chats c
          WHERE NOT EXISTS (
@@ -62,6 +63,7 @@ async fn my_chats(
     State(state): State<AppState>,
     auth: AgentUser,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth.0, "business:read")?;
     let chats = sqlx::query_as::<_, crate::models::chat::Chat>(
         "SELECT c.* FROM chats c
          INNER JOIN chat_assignments ca ON ca.chat_id = c.id
@@ -89,6 +91,7 @@ async fn assign_chat(
     auth: AgentUser,
     Json(req): Json<AssignChatRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth.0, "business:write")?;
     let agent_id = req.agent_id.unwrap_or(auth.0.user_id);
 
     let assignment = sqlx::query_as::<_, ChatAssignment>(
@@ -116,6 +119,7 @@ async fn take_chat(
     auth: AgentUser,
     Json(req): Json<TakeChatRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth.0, "business:write")?;
     // Check not already assigned
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM chat_assignments WHERE chat_id = $1 AND status = 'active')",
@@ -161,6 +165,7 @@ async fn transfer_chat(
     auth: AgentUser,
     Json(req): Json<TransferChatRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth.0, "business:write")?;
     // Mark existing assignment as transferred
     sqlx::query(
         "UPDATE chat_assignments SET status = 'transferred', completed_at = NOW()
@@ -195,9 +200,10 @@ async fn transfer_chat(
 
 async fn list_tickets(
     State(state): State<AppState>,
-    _auth: AgentUser,
+    auth: AgentUser,
     Query(query): Query<TicketListQuery>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth.0, "tickets:read")?;
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(20).min(100);
     let offset = (page - 1) * per_page;
@@ -227,6 +233,7 @@ async fn create_ticket(
     auth: AgentUser,
     Json(req): Json<CreateTicketRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth.0, "tickets:write")?;
     let priority = req.priority.unwrap_or(TicketPriority::Medium);
 
     let ticket = sqlx::query_as::<_, Ticket>(
@@ -254,9 +261,10 @@ async fn create_ticket(
 
 async fn get_ticket(
     State(state): State<AppState>,
-    _auth: AgentUser,
+    auth: AgentUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth.0, "tickets:read")?;
     let ticket = sqlx::query_as::<_, Ticket>("SELECT * FROM tickets WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)
@@ -287,10 +295,11 @@ async fn get_ticket(
 
 async fn update_ticket(
     State(state): State<AppState>,
-    _auth: AgentUser,
+    auth: AgentUser,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateTicketRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth.0, "tickets:write")?;
     let ticket = sqlx::query_as::<_, Ticket>(
         "UPDATE tickets SET
          status = COALESCE($2, status),
@@ -326,9 +335,10 @@ async fn update_ticket(
 
 async fn get_ticket_notes(
     State(state): State<AppState>,
-    _auth: AgentUser,
+    auth: AgentUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth.0, "tickets:read")?;
     let notes = sqlx::query_as::<_, TicketNote>(
         "SELECT * FROM ticket_notes WHERE ticket_id = $1 ORDER BY created_at",
     )
@@ -351,6 +361,7 @@ async fn add_ticket_note(
     Path(id): Path<Uuid>,
     Json(req): Json<CreateTicketNoteRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth.0, "tickets:write")?;
     let note = sqlx::query_as::<_, TicketNote>(
         "INSERT INTO ticket_notes (id, ticket_id, note, created_by)
          VALUES ($1, $2, $3, $4) RETURNING *",
@@ -376,6 +387,7 @@ async fn create_escalation(
     auth: AgentUser,
     Json(req): Json<CreateEscalationRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth.0, "tickets:write")?;
     let escalation = sqlx::query_as::<_, Escalation>(
         "INSERT INTO escalations (id, ticket_id, from_user_id, to_user_id, reason, status)
          VALUES ($1, $2, $3, $4, $5, 'pending') RETURNING *",
@@ -399,10 +411,11 @@ async fn create_escalation(
 
 async fn resolve_escalation(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AdminUser,
     Path(id): Path<Uuid>,
     Json(req): Json<ResolveEscalationRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth.0, "tickets:write")?;
     let status: EscalationStatus = match req.action.as_str() {
         "accepted" => EscalationStatus::Accepted,
         "resolved" => EscalationStatus::Resolved,
@@ -444,6 +457,7 @@ async fn list_quick_replies(
     State(state): State<AppState>,
     auth: AgentUser,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth.0, "quick_replies:read")?;
     let replies = sqlx::query_as::<_, QuickReply>(
         "SELECT * FROM quick_replies WHERE is_global = true OR created_by = $1 ORDER BY shortcut",
     )
@@ -465,6 +479,7 @@ async fn create_quick_reply(
     auth: AgentUser,
     Json(req): Json<CreateQuickReplyRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth.0, "quick_replies:write")?;
     let reply = sqlx::query_as::<_, QuickReply>(
         "INSERT INTO quick_replies (id, title, shortcut, content, category, is_global, created_by)
          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *",
@@ -490,10 +505,11 @@ async fn create_quick_reply(
 
 async fn update_quick_reply(
     State(state): State<AppState>,
-    _auth: AgentUser,
+    auth: AgentUser,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateQuickReplyRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth.0, "quick_replies:write")?;
     let reply = sqlx::query_as::<_, QuickReply>(
         "UPDATE quick_replies SET
          title = COALESCE($2, title),
@@ -529,8 +545,9 @@ async fn update_quick_reply(
 
 async fn get_analytics(
     State(state): State<AppState>,
-    _auth: AgentUser,
+    auth: AgentUser,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth.0, "business:read")?;
     // Messages today
     let messages_today: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM messages WHERE timestamp >= CURRENT_DATE",
@@ -590,8 +607,9 @@ async fn get_analytics(
 
 async fn list_agents(
     State(state): State<AppState>,
-    _auth: AgentUser,
+    auth: AgentUser,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth.0, "business:read")?;
     let agents = sqlx::query_as::<_, crate::models::user::User>(
         "SELECT * FROM users WHERE role IN ('admin', 'agent') AND is_active = true ORDER BY username",
     )

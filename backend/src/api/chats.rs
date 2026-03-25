@@ -6,7 +6,7 @@ use axum::{
 };
 use uuid::Uuid;
 
-use crate::auth::middleware::AuthUser;
+use crate::auth::middleware::{AuthUser, require_scope};
 use crate::models::chat::*;
 use crate::models::message::*;
 use crate::AppState;
@@ -25,9 +25,10 @@ pub fn routes() -> Router<AppState> {
 
 async fn list_chats(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Query(query): Query<ChatListQuery>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth, "chats:read")?;
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(50).min(100);
     let offset = (page - 1) * per_page;
@@ -76,9 +77,10 @@ async fn list_chats(
 
 async fn list_contacts(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Query(query): Query<ContactsQuery>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth, "chats:read")?;
     let contacts = sqlx::query_as::<_, Contact>(
         "SELECT * FROM contacts WHERE ($1::uuid IS NULL OR session_id = $1) ORDER BY push_name ASC NULLS LAST",
     )
@@ -100,10 +102,11 @@ async fn list_contacts(
 
 async fn list_messages(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(chat_id): Path<Uuid>,
     Query(query): Query<MessageListQuery>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth, "chats:read")?;
     let limit = query.limit.unwrap_or(50).min(100);
 
     let messages = if let Some(cursor) = &query.cursor {
@@ -208,9 +211,10 @@ async fn list_messages(
 /// The media is encrypted on WhatsApp CDN and needs decryption keys from DB
 async fn get_media(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path((chat_id, message_id)): Path<(Uuid, Uuid)>,
 ) -> Result<impl IntoResponse, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth, "chats:read")?;
     // Get message with media info
     let msg = sqlx::query_as::<_, Message>("SELECT * FROM messages WHERE id = $1 AND chat_id = $2")
         .bind(message_id)
@@ -312,6 +316,7 @@ async fn send_message(
     Path(chat_id): Path<Uuid>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth, "chats:write")?;
     // Get chat info
     let chat = sqlx::query_as::<_, Chat>("SELECT * FROM chats WHERE id = $1")
         .bind(chat_id)
@@ -420,6 +425,7 @@ async fn send_media_message(
     Path(chat_id): Path<Uuid>,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth, "chats:write")?;
     let mut file_data: Option<Vec<u8>> = None;
     let mut file_name: Option<String> = None;
     let mut mime_type: Option<String> = None;
@@ -559,9 +565,10 @@ async fn send_media_message(
 
 async fn mark_as_read(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(chat_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth, "chats:write")?;
     sqlx::query("UPDATE chats SET unread_count = 0 WHERE id = $1")
         .bind(chat_id)
         .execute(&state.db)
@@ -581,6 +588,7 @@ async fn trigger_sync(
     auth: AuthUser,
     Json(req): Json<SyncRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    require_scope(&auth, "chats:write")?;
     let session_id = req.session_id.ok_or_else(|| {
         (
             axum::http::StatusCode::BAD_REQUEST,

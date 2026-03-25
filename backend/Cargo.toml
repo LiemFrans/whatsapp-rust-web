@@ -40,6 +40,8 @@ waproto = "0.5"
 # Auth & crypto
 jsonwebtoken = "9"
 argon2 = "0.5"
+sha2 = "0.10"
+hex = "0.4"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

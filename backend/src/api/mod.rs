@@ -1,3 +1,4 @@
+pub mod api_tokens;
 pub mod auth;
 pub mod business;
 pub mod chats;
@@ -12,6 +13,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/health", get(health_check))
         .nest("/api/auth", auth::routes())
+        .nest("/api/tokens", api_tokens::routes())
         .nest("/api/users", users::routes())
         .nest("/api/whatsapp", whatsapp_routes::routes())
         .nest("/api/chats", chats::routes())
