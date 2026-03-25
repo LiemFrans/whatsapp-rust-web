@@ -18,10 +18,21 @@ use crate::models::display::preferred_display_name;
 use crate::webhook::{self, WebhookClient};
 use crate::websocket::hub::WebSocketHub;
 
+fn normalize_phone_jid(jid: &impl ToString) -> String {
+    let jid = jid.to_string();
+    let user = jid.split('@').next().unwrap_or(&jid);
+    let user = user.split(':').next().unwrap_or(user);
+    if user.starts_with('+') {
+        user.to_string()
+    } else {
+        format!("+{}", user)
+    }
+}
+
 /// Main event dispatcher — called for every WhatsApp event
 pub async fn handle_event(
     event: Event,
-    _client: Arc<Client>,
+    client: Arc<Client>,
     session_id: Uuid,
     user_id: Uuid,
     db: &PgPool,
@@ -71,7 +82,7 @@ pub async fn handle_event(
         Event::PairSuccess(pair_info) => {
             info!(%session_id, "Pairing successful: {:?}", pair_info.id);
 
-            let phone = pair_info.id.to_string();
+            let phone = normalize_phone_jid(&pair_info.id);
             let _ = sqlx::query(
                 "UPDATE whatsapp_sessions SET status = 'connected', phone_number = $2, qr_code_data = NULL, last_active_at = NOW() WHERE id = $1",
             )
@@ -85,10 +96,21 @@ pub async fn handle_event(
         Event::Connected(_) => {
             info!(%session_id, "WhatsApp session connected");
 
+            let phone_number = client
+                .get_pn()
+                .await
+                .map(|jid| normalize_phone_jid(&jid));
+
             let _ = sqlx::query(
-                "UPDATE whatsapp_sessions SET status = 'connected', qr_code_data = NULL, last_active_at = NOW() WHERE id = $1",
+                "UPDATE whatsapp_sessions
+                 SET status = 'connected',
+                     phone_number = COALESCE($2, phone_number),
+                     qr_code_data = NULL,
+                     last_active_at = NOW()
+                 WHERE id = $1",
             )
             .bind(session_id)
+            .bind(&phone_number)
             .execute(db)
             .await;
 

@@ -23,7 +23,7 @@ pub async fn run_migrations(pool: &PgPool) -> anyhow::Result<()> {
         let statements = split_sql_statements(sql);
         for stmt in &statements {
             let s = stmt.trim();
-            if !s.is_empty() && !s.starts_with("--") {
+            if !s.is_empty() {
                 if let Err(e) = sqlx::query(s).execute(pool).await {
                     tracing::warn!("Migration statement error (may be harmless): {}", e);
                 }
@@ -37,7 +37,7 @@ pub async fn run_migrations(pool: &PgPool) -> anyhow::Result<()> {
     let stmts_002 = split_sql_statements(sql_002);
     for stmt in &stmts_002 {
         let s = stmt.trim();
-        if !s.is_empty() && !s.starts_with("--") {
+        if !s.is_empty() {
             if let Err(e) = sqlx::query(s).execute(pool).await {
                 tracing::warn!("Migration 002 statement (may be harmless): {}", e);
             }
@@ -49,9 +49,21 @@ pub async fn run_migrations(pool: &PgPool) -> anyhow::Result<()> {
     let stmts_003 = split_sql_statements(sql_003);
     for stmt in &stmts_003 {
         let s = stmt.trim();
-        if !s.is_empty() && !s.starts_with("--") {
+        if !s.is_empty() {
             if let Err(e) = sqlx::query(s).execute(pool).await {
                 tracing::warn!("Migration 003 statement (may be harmless): {}", e);
+            }
+        }
+    }
+
+    // Always apply incremental migration 004 (uses IF NOT EXISTS, safe to re-run)
+    let sql_004 = include_str!("../../../database/migrations/004_webhook_config.sql");
+    let stmts_004 = split_sql_statements(sql_004);
+    for stmt in &stmts_004 {
+        let s = stmt.trim();
+        if !s.is_empty() {
+            if let Err(e) = sqlx::query(s).execute(pool).await {
+                tracing::warn!("Migration 004 statement (may be harmless): {}", e);
             }
         }
     }
@@ -77,10 +89,10 @@ fn split_sql_statements(sql: &str) -> Vec<String> {
             }
             current.clear();
         } else if ch == '-' && chars.peek() == Some(&'-') && !in_dollar_quote {
-            // Skip line comments
-            current.push(ch);
+            // Skip line comments entirely so comment-prefixed SQL statements
+            // are still executed correctly after splitting.
+            chars.next();
             while let Some(c) = chars.next() {
-                current.push(c);
                 if c == '\n' {
                     break;
                 }

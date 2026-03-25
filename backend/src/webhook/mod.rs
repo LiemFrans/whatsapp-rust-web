@@ -76,6 +76,8 @@ impl WebhookClient {
             }
         };
 
+        let webhook_url = webhook_url.replace("{phone_number}", phone_number);
+
         let payload = serde_json::json!({
             "phone_number": phone_number,
             "event": event,
