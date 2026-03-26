@@ -172,8 +172,9 @@ pub async fn handle_event(
 
             // Upsert the chat
             let chat_name = if is_group {
-                // For groups, use chat JID (group name will come from other events)
-                chat_jid.clone()
+                existing_meaningful_chat_name(db, session_id, &chat_jid)
+                    .await
+                    .unwrap_or_else(|| chat_jid.clone())
             } else if is_from_me {
                 // For outgoing messages, use chat JID as name (receiver)
                 chat_jid.clone()
@@ -330,6 +331,17 @@ pub async fn handle_event(
             if !is_from_me {
                 let session_phone = get_session_phone_number(db, session_id).await;
                 if let Some(ref phone) = session_phone {
+                    let webhook_chat_name = sqlx::query_scalar::<_, String>(
+                        "SELECT name FROM chats WHERE id = $1"
+                    )
+                    .bind(chat_id)
+                    .fetch_optional(db)
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| chat_name.clone());
+
                     let webhook_data = webhook::build_message_payload(
                         &message_id,
                         sender_phone_number.as_deref().unwrap_or(&sender_jid),
@@ -337,7 +349,7 @@ pub async fn handle_event(
                         phone,
                         is_group,
                         Some(&chat_jid),
-                        Some(&chat_name),
+                        Some(&webhook_chat_name),
                         Some(&sender_jid),
                         sender_name.as_deref(),
                         Some(&sender_jid),
@@ -1014,6 +1026,32 @@ async fn get_session_phone_number(db: &sqlx::PgPool, session_id: uuid::Uuid) -> 
         .await
         .ok()
         .flatten()
+}
+
+async fn existing_meaningful_chat_name(
+    db: &PgPool,
+    session_id: Uuid,
+    chat_jid: &str,
+) -> Option<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT name
+         FROM chats
+         WHERE session_id = $1
+           AND chat_jid = $2
+           AND name IS NOT NULL
+           AND name <> ''
+           AND name <> chat_jid
+           AND name NOT LIKE '%@lid'
+           AND name NOT LIKE '%@g.us'
+           AND name NOT LIKE '%@s.whatsapp.net'
+         LIMIT 1",
+    )
+    .bind(session_id)
+    .bind(chat_jid)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
 }
 
 #[cfg(test)]
