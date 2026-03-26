@@ -161,6 +161,12 @@ pub fn build_message_payload(
     from: &str,
     from_name: Option<&str>,
     to: &str,
+    is_group: bool,
+    chat_jid: Option<&str>,
+    chat_name: Option<&str>,
+    participant_jid: Option<&str>,
+    participant_name: Option<&str>,
+    sender_jid: Option<&str>,
     timestamp: &chrono::DateTime<chrono::Utc>,
     msg_type: &str,
     content: Option<&str>,
@@ -173,9 +179,30 @@ pub fn build_message_payload(
         "from": from,
         "from_name": from_name.unwrap_or(from),
         "to": to,
+        "is_group": is_group,
         "timestamp": timestamp.to_rfc3339(),
         "type": msg_type,
     });
+
+    if let Some(value) = chat_jid.filter(|value| !value.is_empty()) {
+        data["chat_jid"] = serde_json::json!(value);
+    }
+
+    if let Some(value) = chat_name.filter(|value| !value.is_empty()) {
+        data["chat_name"] = serde_json::json!(value);
+    }
+
+    if let Some(value) = participant_jid.filter(|value| !value.is_empty()) {
+        data["participant_jid"] = serde_json::json!(value);
+    }
+
+    if let Some(value) = participant_name.filter(|value| !value.is_empty()) {
+        data["participant_name"] = serde_json::json!(value);
+    }
+
+    if let Some(value) = sender_jid.filter(|value| !value.is_empty()) {
+        data["sender_jid"] = serde_json::json!(value);
+    }
 
     // Add type-specific data
     match msg_type {
